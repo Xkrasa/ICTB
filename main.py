@@ -1,5 +1,6 @@
 """FastAPI 入口：路由 + 长轮询 + 静态文件挂载 + 同源服务前端（免 CORS）。"""
 import os
+import uuid
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -9,14 +10,14 @@ from pydantic import BaseModel
 import orchestrator
 from storage import storage
 
-# StaticFiles 挂载要求目录已存在
 os.makedirs("assets", exist_ok=True)
 
-app = FastAPI(title="AI 团播资产画布 — Phase 1")
+app = FastAPI(title="AI 团播资产画布 — Phase 2")
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 
-# ---- Pydantic 入参/出参模型 ----
+# ───────────────────────── Pydantic 模型 ─────────────────────────
+
 class MockRunRequest(BaseModel):
     workflow_id: str
 
@@ -47,12 +48,42 @@ class TaskStatusResponse(BaseModel):
     error: str | None = None
 
 
-# ---- 路由 ----
+# Phase 2 画布模型
+class NodeData(BaseModel):
+    id: str
+    type: str
+    x: float = 0
+    y: float = 0
+    data: dict = {}
+
+
+class ConnectionData(BaseModel):
+    id: str
+    from_node: str
+    to: str
+
+    model_config = {"populate_by_name": True}
+
+    def __init__(self, **data):
+        if "from" in data:
+            data["from_node"] = data.pop("from")
+        super().__init__(**data)
+
+
+class CanvasRunRequest(BaseModel):
+    nodes: list[NodeData]
+    connections: list[ConnectionData]
+
+
+# ───────────────────────── 路由 ─────────────────────────
+
 @app.get("/")
 async def index():
     """同源服务前端单文件，免 CORS"""
     return FileResponse("index.html")
 
+
+# ---- Phase 1 兼容路由 ----
 
 @app.post("/api/stages/mock/run")
 async def mock_run(req: MockRunRequest):
@@ -95,3 +126,29 @@ async def upload_asset(file: UploadFile = File(...)):
     ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() or "bin"
     url = await storage.save(data, ext)
     return AssetUploadResponse(url=url)
+
+
+# ---- Phase 2 画布路由 ----
+
+@app.post("/api/canvas/run")
+async def canvas_run(req: CanvasRunRequest):
+    """执行画布：接收节点和连线，启动 DAG 级联执行"""
+    canvas_id = uuid.uuid4().hex
+    nodes = [n.model_dump() for n in req.nodes]
+    conns = [{"id": c.id, "from": c.from_node, "to": c.to} for c in req.connections]
+    node_statuses = orchestrator.execute_canvas(canvas_id, nodes, conns)
+    return {"canvas_id": canvas_id, "node_statuses": node_statuses}
+
+
+@app.get("/api/canvas/{canvas_id}/nodes/{node_id}")
+async def get_node_status(canvas_id: str, node_id: str):
+    """查询单个节点的实时状态（前端轮询用）"""
+    rec = orchestrator.registry.get(f"{canvas_id}:{node_id}")
+    if rec is None:
+        raise HTTPException(status_code=404, detail="node not found")
+    return {
+        "status": rec["status"],
+        "progress": rec["progress"],
+        "image_url": rec.get("image_url"),
+        "error": rec.get("error"),
+    }

@@ -130,3 +130,61 @@ def _build_prompt(hair: str, makeup: str, clothing: str) -> str:
         "纯透明背景（用于后续海报合成）。\n"
         "高质量，画面中不要出现任何文字与水印。"
     )
+
+
+async def edit_image(reference_image_bytes: bytes, prompt: str) -> bytes:
+    """通用图像编辑：参考图 + 任意 prompt → PNG bytes。
+
+    与 generate_character 共用 _ensure_rgb / 429 重试 / _extract_image_bytes，
+    区别仅在于 prompt 由调用方完全自定义。
+    """
+    rgb_bytes = _ensure_rgb(reference_image_bytes)
+    full_prompt = prompt + "\n纯透明背景。高质量，画面中不要出现任何文字与水印。"
+
+    form_data = {
+        "model": config.GPT_IMAGE_MODEL,
+        "prompt": full_prompt,
+        "size": config.GPT_IMAGE_SIZE,
+        "quality": config.GPT_IMAGE_QUALITY,
+        "background": "transparent",
+        "n": "1",
+    }
+    if config.GPT_IMAGE_THINKING:
+        form_data["thinking"] = config.GPT_IMAGE_THINKING
+
+    headers = {
+        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    last_err: Exception | None = None
+    async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as client:
+        for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
+            if backoff:
+                await asyncio.sleep(backoff)
+            try:
+                resp = await client.post(
+                    f"{config.OPENAI_BASE_URL}/images/edits",
+                    headers=headers,
+                    data=form_data,
+                    files={"image": ("reference.png", rgb_bytes, "image/png")},
+                )
+                if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
+                    last_err = RuntimeError(
+                        f"gpt-image HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
+                    )
+                    continue
+                resp.raise_for_status()
+                payload = resp.json()
+                return await _extract_image_bytes(payload)
+            except httpx.HTTPStatusError as e:
+                raise RuntimeError(
+                    f"gpt-image HTTP {e.response.status_code}: {e.response.text}"
+                ) from e
+            except httpx.HTTPError as e:
+                if attempt < len(_RETRY_BACKOFFS):
+                    last_err = e
+                    continue
+                raise RuntimeError(f"gpt-image 请求失败: {e}") from e
+
+    raise RuntimeError(f"gpt-image 重试 {len(_RETRY_BACKOFFS)} 次仍失败: {last_err}")
