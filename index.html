@@ -14,6 +14,7 @@
       --c-gpt_image:   #A855F7;
       --c-remove_bg:   #06B6D4;
       --c-seedance:    #F59E0B;
+      --c-mask_edit:   #EC4899;
     }
 
     /* ═══════════ 工具栏 ═══════════ */
@@ -40,6 +41,7 @@
     .tb-btn.add-btn[data-type="gpt_image"]:hover { color: var(--c-gpt_image); }
     .tb-btn.add-btn[data-type="remove_bg"]:hover { color: var(--c-remove_bg); }
     .tb-btn.add-btn[data-type="seedance_video"]:hover { color: var(--c-seedance); }
+    .tb-btn.add-btn[data-type="mask_edit"]:hover { color: var(--c-mask_edit); }
     .tb-btn.primary {
       background: linear-gradient(135deg, #6366F1, #8B5CF6); color: #fff; font-weight: 600;
       border: 1px solid rgba(139,92,246,0.4); box-shadow: 0 2px 8px rgba(99,102,241,0.25);
@@ -236,6 +238,46 @@
     #statusbar .sb-dot.running { background: #6366F1; box-shadow: 0 0 5px #6366F1; }
     #statusbar .sb-dot.success { background: #10B981; }
     #statusbar .sb-dot.failed { background: #EF4444; }
+
+    /* ═══════════ 遮罩编辑器弹窗 ═══════════ */
+    #mask-editor-modal {
+      position: fixed; z-index: 3000; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+      display: none; align-items: center; justify-content: center;
+    }
+    #mask-editor-modal .mask-editor-box {
+      background: rgba(22,22,28,0.95); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px;
+    }
+    #mask-editor-modal .mask-editor-header {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 15px; font-weight: 600; color: #fff;
+    }
+    #mask-editor-modal .mask-editor-header .close-btn { cursor: pointer; color: #888; font-size: 16px; }
+    #mask-editor-modal .mask-editor-header .close-btn:hover { color: #fff; }
+    #mask-editor-modal .mask-editor-toolbar {
+      display: flex; gap: 12px; align-items: center; font-size: 12px; color: #aaa;
+    }
+    #mask-editor-modal .mask-editor-toolbar button {
+      padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05); color: #ccc; cursor: pointer; font-size: 12px;
+    }
+    #mask-editor-modal .mask-editor-toolbar button:hover { background: rgba(255,255,255,0.1); color: #fff; }
+    #mask-editor-modal .mask-editor-toolbar input[type="range"] { vertical-align: middle; }
+    #mask-editor-modal canvas {
+      border-radius: 8px; cursor: crosshair; max-width: 90vw; max-height: 70vh;
+    }
+    #mask-editor-modal .mask-editor-footer {
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+    #mask-editor-modal .mask-editor-footer button {
+      padding: 6px 16px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05); color: #ccc; cursor: pointer; font-size: 13px;
+    }
+    #mask-editor-modal .mask-editor-footer button:hover { background: rgba(255,255,255,0.1); color: #fff; }
+    #mask-editor-modal .mask-editor-footer button.primary {
+      background: linear-gradient(135deg, #6366F1, #8B5CF6); color: #fff; border: none;
+    }
   </style>
 </head>
 <body>
@@ -247,6 +289,7 @@
     <button class="tb-btn add-btn" data-type="image_input" onclick="addNode('image_input')"><span class="icon">🖼️</span>图片输入</button>
     <button class="tb-btn add-btn" data-type="gpt_image" onclick="addNode('gpt_image')"><span class="icon">✨</span>AI 生图</button>
     <button class="tb-btn add-btn" data-type="remove_bg" onclick="addNode('remove_bg')"><span class="icon">✂️</span>抠图</button>
+    <button class="tb-btn add-btn" data-type="mask_edit" onclick="addNode('mask_edit')"><span class="icon">🖌️</span>遮罩</button>
     <button class="tb-btn add-btn" data-type="seedance_video" onclick="addNode('seedance_video')"><span class="icon">🎬</span>视频生成</button>
     <div class="tb-divider"></div>
     <button class="tb-btn" onclick="saveCanvas()"><span class="icon">💾</span>保存</button>
@@ -258,6 +301,8 @@
     <button class="tb-btn" onclick="resetView()" title="复位">⌂</button>
     <div class="tb-divider"></div>
     <button class="tb-btn danger" onclick="clearCanvas()">清空</button>
+    <div class="tb-divider"></div>
+    <button class="tb-btn" onclick="cloneChain()"><span class="icon">🔗</span>克隆链路</button>
     <button class="tb-btn primary" onclick="runCanvas()">▶ 运行</button>
   </div>
 
@@ -275,6 +320,7 @@
     <div class="menu-item" onclick="addNodeAt('image_input', ctxPos.x, ctxPos.y)"><span class="mi-icon">🖼️</span>图片输入</div>
     <div class="menu-item" onclick="addNodeAt('gpt_image', ctxPos.x, ctxPos.y)"><span class="mi-icon">✨</span>AI 生图</div>
     <div class="menu-item" onclick="addNodeAt('remove_bg', ctxPos.x, ctxPos.y)"><span class="mi-icon">✂️</span>抠图</div>
+    <div class="menu-item" onclick="addNodeAt('mask_edit', ctxPos.x, ctxPos.y)"><span class="mi-icon">🖌️</span>遮罩编辑</div>
     <div class="menu-item" onclick="addNodeAt('seedance_video', ctxPos.x, ctxPos.y)"><span class="mi-icon">🎬</span>视频生成</div>
   </div>
 
@@ -284,6 +330,26 @@
       <span class="close-btn" onclick="closeModal()">✕</span>
       <div class="modal-title">已保存的画布</div>
       <div id="canvas-list-body"></div>
+    </div>
+  </div>
+
+  <!-- 遮罩编辑器弹窗 -->
+  <div id="mask-editor-modal">
+    <div class="mask-editor-box">
+      <div class="mask-editor-header">
+        <span>遮罩编辑器</span>
+        <span class="close-btn" onclick="closeMaskEditor()">✕</span>
+      </div>
+      <div class="mask-editor-toolbar">
+        <label>画笔大小: <input type="range" id="brush-size" min="10" max="80" value="30"></label>
+        <button id="eraser-btn" onclick="toggleEraser()">橡皮擦</button>
+        <button onclick="clearMask()">清空</button>
+      </div>
+      <canvas id="mask-canvas"></canvas>
+      <div class="mask-editor-footer">
+        <button onclick="closeMaskEditor()">取消</button>
+        <button class="primary" onclick="saveMask()">保存遮罩</button>
+      </div>
     </div>
   </div>
 
@@ -314,6 +380,7 @@
       image_input:   { icon: '🖼️', title: '图片输入', color: 'var(--c-image_input)' },
       gpt_image:     { icon: '✨', title: 'AI 生图',  color: 'var(--c-gpt_image)' },
       remove_bg:     { icon: '✂️', title: '抠图',     color: 'var(--c-remove_bg)' },
+      mask_edit:     { icon: '🖌️', title: '遮罩编辑', color: 'var(--c-mask_edit)' },
       seedance_video:{ icon: '🎬', title: '视频生成', color: 'var(--c-seedance)' },
     };
     const STATUS_LABELS = { idle:'待机', pending:'排队', running:'运行中', success:'完成', failed:'失败', blocked:'阻断' };
@@ -359,6 +426,7 @@
         case 'image_input': return { image_url: null };
         case 'gpt_image': return { prompt:'', hair:'', makeup:'', clothing:'' };
         case 'remove_bg': return {};
+        case 'mask_edit': return { mask_url: null };
         case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16' };
         default: return {};
       }
@@ -381,6 +449,63 @@
       selectedNode = null; currentCanvasId = null;
       renderConnections(); updateStatusbar();
       localStorage.removeItem('autosave');
+    }
+
+    function cloneChain() {
+      if (!selectedNode) { alert('请先选中一条链路中的任意节点'); return; }
+      // BFS 找到整条链路的所有节点
+      const chainNodes = new Set([selectedNode]);
+      const queue = [selectedNode];
+      while (queue.length) {
+        const nid = queue.shift();
+        // 上游
+        for (const c of canvasData.connections) {
+          if (c.to === nid && !chainNodes.has(c.from)) {
+            chainNodes.add(c.from);
+            queue.push(c.from);
+          }
+        }
+        // 下游
+        for (const c of canvasData.connections) {
+          if (c.from === nid && !chainNodes.has(c.to)) {
+            chainNodes.add(c.to);
+            queue.push(c.to);
+          }
+        }
+      }
+      // 克隆节点
+      const idMap = {};
+      const offsetX = 40, offsetY = 40;
+      for (const nid of chainNodes) {
+        const old = canvasData.nodes.find(n => n.id === nid);
+        if (!old) continue;
+        const newId = uid();
+        idMap[nid] = newId;
+        const newNode = {
+          id: newId,
+          type: old.type,
+          x: old.x + offsetX,
+          y: old.y + offsetY,
+          data: JSON.parse(JSON.stringify(old.data))
+        };
+        // 清除运行状态
+        delete newNode.data._error;
+        canvasData.nodes.push(newNode);
+        renderNode(newNode);
+      }
+      // 克隆连线
+      for (const c of canvasData.connections) {
+        if (chainNodes.has(c.from) && chainNodes.has(c.to)) {
+          canvasData.connections.push({
+            id: uid(),
+            from: idMap[c.from],
+            to: idMap[c.to]
+          });
+        }
+      }
+      renderConnections();
+      updateStatusbar();
+      autoSave();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -430,6 +555,11 @@
             <div style="flex:1"><div class="node-label">发型</div><input class="node-input" placeholder="微分碎盖" value="${d.hair||''}" oninput="updateNodeData('${node.id}','hair',this.value)" /></div>
             <div style="flex:1"><div class="node-label">服装</div><input class="node-input" placeholder="机车夹克" value="${d.clothing||''}" oninput="updateNodeData('${node.id}','clothing',this.value)" /></div>
           </div>`;
+      } else if (node.type === 'mask_edit') {
+        if (d.mask_url) {
+          html += `<div class="node-preview"><div class="checkerboard"></div><img src="${d.mask_url}" /></div>`;
+        }
+        html += `<div style="font-size:11px;color:var(--c-mask_edit);padding:4px 6px;background:rgba(236,72,153,0.06);border-radius:5px;text-align:center;">双击编辑遮罩</div>`;
       } else if (node.type === 'seedance_video') {
         html += `<div><div class="node-label">视频描述</div><input class="node-input" placeholder="人物微笑，缓慢转头..." value="${d.prompt||''}" oninput="updateNodeData('${node.id}','prompt',this.value)" /></div>`;
         html += `<div style="display:flex;gap:5px">
@@ -472,6 +602,182 @@
         if (node) { node.data.image_url = d.url; refreshNodePreview(nodeId); autoSave(); }
       } catch(e) { alert('上传失败: '+e.message); }
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 遮罩编辑器
+    // ═══════════════════════════════════════════════════════════════
+    let maskEditorNodeId = null;
+    let maskCtx = null;
+    let maskDrawing = false;
+    let maskEraser = false;
+    let maskImage = null;
+    let maskPaintCanvas = null; // 离屏画布：仅保存红色涂抹层
+
+    function openMaskEditor(nodeId) {
+      const node = canvasData.nodes.find(n => n.id === nodeId);
+      if (!node) return;
+      const upstreamConn = canvasData.connections.find(c => c.to === nodeId);
+      let imageUrl = node.data.image_url;
+      if (!imageUrl && upstreamConn) {
+        const upstreamNode = canvasData.nodes.find(n => n.id === upstreamConn.from);
+        if (upstreamNode) imageUrl = upstreamNode.data.image_url;
+      }
+      if (!imageUrl) { alert('请先连线上游图片输入节点'); return; }
+      maskEditorNodeId = nodeId;
+      maskEraser = false;
+      const eraserBtn = document.getElementById('eraser-btn');
+      if (eraserBtn) eraserBtn.style.background = '';
+      document.getElementById('mask-editor-modal').style.display = 'flex';
+      const canvas = document.getElementById('mask-canvas');
+      maskCtx = canvas.getContext('2d');
+      maskImage = new Image();
+      maskImage.crossOrigin = 'anonymous';
+      maskImage.onload = () => {
+        canvas.width = maskImage.width;
+        canvas.height = maskImage.height;
+        maskPaintCanvas = document.createElement('canvas');
+        maskPaintCanvas.width = maskImage.width;
+        maskPaintCanvas.height = maskImage.height;
+        const maxW = window.innerWidth * 0.8, maxH = window.innerHeight * 0.65;
+        const scale = Math.min(maxW / maskImage.width, maxH / maskImage.height, 1);
+        canvas.style.width = (maskImage.width * scale) + 'px';
+        canvas.style.height = (maskImage.height * scale) + 'px';
+        compositeMask();
+        if (node.data.mask_url) {
+          const existingMask = new Image();
+          existingMask.crossOrigin = 'anonymous';
+          existingMask.onload = () => {
+            const tmpC = document.createElement('canvas');
+            tmpC.width = maskImage.width; tmpC.height = maskImage.height;
+            const tctx = tmpC.getContext('2d');
+            tctx.drawImage(existingMask, 0, 0);
+            const mData = tctx.getImageData(0, 0, tmpC.width, tmpC.height).data;
+            const pctx = maskPaintCanvas.getContext('2d');
+            const oData = pctx.createImageData(tmpC.width, tmpC.height);
+            const od = oData.data;
+            for (let i = 0; i < mData.length; i += 4) {
+              if (mData[i+3] < 128) {
+                od[i] = 236; od[i+1] = 72; od[i+2] = 153; od[i+3] = 128;
+              }
+            }
+            pctx.putImageData(oData, 0, 0);
+            compositeMask();
+          };
+          existingMask.src = node.data.mask_url;
+        }
+      };
+      maskImage.src = imageUrl;
+    }
+
+    function compositeMask() {
+      if (!maskCtx || !maskImage) return;
+      maskCtx.clearRect(0, 0, maskCtx.canvas.width, maskCtx.canvas.height);
+      maskCtx.drawImage(maskImage, 0, 0);
+      if (maskPaintCanvas) maskCtx.drawImage(maskPaintCanvas, 0, 0);
+    }
+
+    function redrawMask() { compositeMask(); }
+
+    function closeMaskEditor() {
+      document.getElementById('mask-editor-modal').style.display = 'none';
+      maskEditorNodeId = null;
+      maskDrawing = false;
+    }
+
+    function toggleEraser() {
+      maskEraser = !maskEraser;
+      const btn = document.getElementById('eraser-btn');
+      if (btn) btn.style.background = maskEraser ? 'rgba(236,72,153,0.2)' : '';
+    }
+
+    function clearMask() {
+      if (!maskPaintCanvas) return;
+      const pctx = maskPaintCanvas.getContext('2d');
+      pctx.clearRect(0, 0, maskPaintCanvas.width, maskPaintCanvas.height);
+      compositeMask();
+    }
+
+    function getMaskPos(e) {
+      const canvas = document.getElementById('mask-canvas');
+      const r = canvas.getBoundingClientRect();
+      const sx = canvas.width / r.width, sy = canvas.height / r.height;
+      return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+    }
+
+    function startMaskDraw(e) {
+      maskDrawing = true;
+      drawMask(e);
+    }
+
+    function drawMask(e) {
+      if (!maskDrawing || !maskCtx || !maskPaintCanvas) return;
+      const pos = getMaskPos(e);
+      const size = parseInt(document.getElementById('brush-size').value);
+      const pctx = maskPaintCanvas.getContext('2d');
+      if (maskEraser) {
+        pctx.save();
+        pctx.globalCompositeOperation = 'destination-out';
+        pctx.beginPath();
+        pctx.arc(pos.x, pos.y, size, 0, Math.PI * 2);
+        pctx.fillStyle = 'rgba(0,0,0,1)';
+        pctx.fill();
+        pctx.restore();
+      } else {
+        pctx.fillStyle = 'rgba(236,72,153,0.5)';
+        pctx.beginPath();
+        pctx.arc(pos.x, pos.y, size, 0, Math.PI * 2);
+        pctx.fill();
+      }
+      compositeMask();
+    }
+
+    function stopMaskDraw() {
+      maskDrawing = false;
+    }
+
+    async function saveMask() {
+      if (!maskPaintCanvas || !maskEditorNodeId) return;
+      const pctx = maskPaintCanvas.getContext('2d');
+      const pData = pctx.getImageData(0, 0, maskPaintCanvas.width, maskPaintCanvas.height).data;
+      const tmp = document.createElement('canvas');
+      tmp.width = maskPaintCanvas.width;
+      tmp.height = maskPaintCanvas.height;
+      const tctx = tmp.getContext('2d');
+      const maskData = tctx.createImageData(tmp.width, tmp.height);
+      const md = maskData.data;
+      for (let i = 0; i < pData.length; i += 4) {
+        if (pData[i+3] > 10) {
+          md[i] = 0; md[i+1] = 0; md[i+2] = 0; md[i+3] = 0;
+        } else {
+          md[i] = 0; md[i+1] = 0; md[i+2] = 0; md[i+3] = 255;
+        }
+      }
+      tctx.putImageData(maskData, 0, 0);
+      tmp.toBlob(async (blob) => {
+        const fd = new FormData();
+        fd.append('file', blob, 'mask.png');
+        try {
+          const resp = await fetch('/api/assets/upload', { method: 'POST', body: fd });
+          const d = await resp.json();
+          const node = canvasData.nodes.find(n => n.id === maskEditorNodeId);
+          if (node) {
+            node.data.mask_url = d.url;
+            refreshNodePreview(maskEditorNodeId);
+            autoSave();
+          }
+          closeMaskEditor();
+        } catch(e) { alert('遮罩上传失败: ' + e.message); }
+      }, 'image/png');
+    }
+
+    // 绑定 canvas 涂抹事件（一次性）
+    (function() {
+      const c = document.getElementById('mask-canvas');
+      c.addEventListener('mousedown', startMaskDraw);
+      c.addEventListener('mousemove', drawMask);
+      c.addEventListener('mouseup', stopMaskDraw);
+      c.addEventListener('mouseleave', stopMaskDraw);
+    })();
 
     // ═══════════════════════════════════════════════════════════════
     // 连线渲染（SVG 贝塞尔曲线）
@@ -548,6 +854,12 @@
         document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
         el.classList.add('selected');
       });
+      if (node.type === 'mask_edit') {
+        el.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          openMaskEditor(node.id);
+        });
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════

@@ -132,23 +132,38 @@ def _build_prompt(hair: str, makeup: str, clothing: str) -> str:
     )
 
 
-async def edit_image(reference_image_bytes: bytes, prompt: str) -> bytes:
-    """通用图像编辑：参考图 + 任意 prompt → PNG bytes。
+async def edit_image(
+    reference_image_bytes: bytes,
+    prompt: str,
+    mask_bytes: bytes | None = None,
+) -> bytes:
+    """通用图像编辑：参考图 + prompt → PNG bytes。
 
-    与 generate_character 共用 _ensure_rgb / 429 重试 / _extract_image_bytes，
-    区别仅在于 prompt 由调用方完全自定义。
+    Args:
+        reference_image_bytes: 参考图原始 bytes
+        prompt: 编辑指令
+        mask_bytes: 可选遮罩 PNG bytes。透明区域（alpha=0）表示需要重绘，
+                    非透明区域保持不变。传入时执行 inpainting 局部重绘。
+
+    与 generate_character 共用 _ensure_rgb / 429 重试 / _extract_image_bytes。
     """
     rgb_bytes = _ensure_rgb(reference_image_bytes)
-    full_prompt = prompt + "\n纯透明背景。高质量，画面中不要出现任何文字与水印。"
+
+    # 有 mask 时执行局部重绘，不要求透明背景
+    if mask_bytes:
+        full_prompt = prompt + "\n高质量，画面中不要出现任何文字与水印。"
+    else:
+        full_prompt = prompt + "\n纯透明背景。高质量，画面中不要出现任何文字与水印。"
 
     form_data = {
         "model": config.GPT_IMAGE_MODEL,
         "prompt": full_prompt,
         "size": config.GPT_IMAGE_SIZE,
         "quality": config.GPT_IMAGE_QUALITY,
-        "background": "transparent",
         "n": "1",
     }
+    if not mask_bytes:
+        form_data["background"] = "transparent"
     if config.GPT_IMAGE_THINKING:
         form_data["thinking"] = config.GPT_IMAGE_THINKING
 
@@ -156,6 +171,10 @@ async def edit_image(reference_image_bytes: bytes, prompt: str) -> bytes:
         "Authorization": f"Bearer {config.OPENAI_API_KEY}",
         "Accept": "application/json",
     }
+
+    files = {"image": ("reference.png", rgb_bytes, "image/png")}
+    if mask_bytes:
+        files["mask"] = ("mask.png", mask_bytes, "image/png")
 
     last_err: Exception | None = None
     async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as client:
@@ -167,7 +186,7 @@ async def edit_image(reference_image_bytes: bytes, prompt: str) -> bytes:
                     f"{config.OPENAI_BASE_URL}/images/edits",
                     headers=headers,
                     data=form_data,
-                    files={"image": ("reference.png", rgb_bytes, "image/png")},
+                    files=files,
                 )
                 if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
                     last_err = RuntimeError(

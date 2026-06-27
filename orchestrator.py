@@ -276,12 +276,19 @@ def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
 
         # 上游成功：把上游产出注入下游参数
         upstream_rec = registry.get(f"{canvas_id}:{node_id}")
-        if upstream_rec is not None and upstream_rec.get("image_url"):
+        if upstream_rec is not None:
             downstream_node = ctx["node_map"].get(downstream, {})
             downstream_data = downstream_node.get("data", {})
-            # 如果下游没有自己指定 image_url，就自动注入上游产出
-            if not downstream_data.get("image_url"):
+            changed = False
+            # 注入图片
+            if upstream_rec.get("image_url") and not downstream_data.get("image_url"):
                 downstream_data["image_url"] = upstream_rec["image_url"]
+                changed = True
+            # 注入遮罩
+            if upstream_rec.get("mask_url"):
+                downstream_data["mask_url"] = upstream_rec["mask_url"]
+                changed = True
+            if changed:
                 downstream_node["data"] = downstream_data
 
         ctx["remaining"][downstream] -= 1
@@ -302,7 +309,7 @@ async def exec_image_input(canvas_id: str, node_id: str, params: dict) -> None:
 
 
 async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
-    """AI 生图节点：参考图 + prompt → 背透 PNG"""
+    """AI 生图节点：参考图 + prompt → 背透 PNG。支持 mask 局部重绘。"""
     ref_url = params.get("image_url")
     if not ref_url:
         raise ValueError("gpt_image 节点缺少输入图片（请连线 image_input 或上游节点）")
@@ -310,14 +317,26 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
     hair = params.get("hair")
     makeup = params.get("makeup", "")
     clothing = params.get("clothing", "")
+    mask_url = params.get("mask_url")
 
     registry.update(f"{canvas_id}:{node_id}", progress=5)
     ref_bytes = await storage.download(ref_url)
     registry.update(f"{canvas_id}:{node_id}", progress=15)
+
+    # 下载遮罩（如果有）
+    mask_bytes = None
+    if mask_url:
+        registry.update(f"{canvas_id}:{node_id}", progress=20)
+        mask_bytes = await storage.download(mask_url)
+
     registry.update(f"{canvas_id}:{node_id}", progress=25)
 
-    # 有换装参数走 generate_character，否则走自由 prompt
-    if hair is not None or makeup or clothing:
+    # 有 mask 走局部重绘
+    if mask_bytes:
+        png_bytes = await gpt_image.edit_image(
+            ref_bytes, prompt or "在遮罩区域重新生成，保持自然过渡", mask_bytes=mask_bytes
+        )
+    elif hair is not None or makeup or clothing:
         png_bytes = await gpt_image.generate_character(
             ref_bytes, hair or prompt, makeup, clothing
         )
@@ -398,8 +417,26 @@ async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> Non
     registry.update(f"{canvas_id}:{node_id}", progress=95, image_url=url)
 
 
+async def exec_mask_edit(canvas_id: str, node_id: str, params: dict) -> None:
+    """遮罩编辑节点：透传原图 + 注入 mask_url。
+
+    前端 Canvas 涂抹后上传 mask 到 /api/assets/upload，mask_url 存入 data。
+    此节点把 image_url 和 mask_url 同时设入 registry，供下游 gpt_image 使用。
+    """
+    ref_url = params.get("image_url")
+    mask_url = params.get("mask_url")
+    if not ref_url:
+        raise ValueError("mask_edit 节点缺少输入图片")
+    if not mask_url:
+        raise ValueError("mask_edit 节点未绘制遮罩（请双击节点编辑遮罩）")
+    registry.update(f"{canvas_id}:{node_id}", progress=50, image_url=ref_url, mask_url=mask_url)
+    await asyncio.sleep(0.1)
+    registry.update(f"{canvas_id}:{node_id}", progress=100)
+
+
 _NODE_EXECUTORS: dict = {
     "image_input": exec_image_input,
+    "mask_edit": exec_mask_edit,
     "gpt_image": exec_gpt_image,
     "remove_bg": exec_remove_bg,
     "seedance_video": exec_seedance_video,
