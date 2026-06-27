@@ -94,6 +94,7 @@
       box-shadow: 0 4px 16px rgba(0,0,0,0.3);
       transition: border-color 0.15s, box-shadow 0.15s;
     }
+    .node.gen-node { width: 440px; min-width: 440px; max-width: 440px; }
     .node:hover { border-color: rgba(255,255,255,0.15); box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
     .node.selected { border-color: var(--node-color); box-shadow: 0 0 0 1px var(--node-color), 0 8px 24px rgba(0,0,0,0.4); }
     .node.dragging { opacity: 0.85; }
@@ -170,6 +171,59 @@
     .node-progress-bar .fill.success { background: #10B981; }
     .node-progress-bar .fill.failed { background: #EF4444; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+    /* ═══════════ 生成类节点专用样式（生图/生视频）═══════════ */
+    .gen-prompt-box {
+      display: flex; gap: 8px; padding: 6px 8px;
+      background: rgba(0,0,0,0.45); border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 8px; align-items: stretch;
+    }
+    .gen-thumb {
+      width: 40px; height: 40px; border-radius: 5px; overflow: hidden;
+      flex: 0 0 40px; border: 1px solid rgba(255,255,255,0.08); background: #111;
+      display: flex; align-items: center; justify-content: center; cursor: pointer;
+    }
+    .gen-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .gen-thumb-empty { font-size: 14px; color: #333; }
+    .gen-textarea-wrap {
+      flex: 1; position: relative; display: flex; flex-direction: column;
+    }
+    .gen-textarea-wrap textarea {
+      width: 100%; min-height: 110px; max-height: 260px; background: transparent;
+      border: none; outline: none; color: #ddd; font-size: 11px; line-height: 1.55;
+      resize: vertical; padding: 2px 0 14px 0;
+      overflow-y: auto; scrollbar-width: thin; flex: 1;
+    }
+    .gen-textarea-wrap textarea::-webkit-scrollbar { width: 4px; }
+    .gen-textarea-wrap textarea::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+    .gen-textarea-wrap textarea::placeholder { color: #444; }
+    .gen-char-count {
+      position: absolute; bottom: 0; right: 0; font-size: 9px; color: #555;
+      font-variant-numeric: tabular-nums;
+    }
+    .gen-toolbar {
+      display: flex; align-items: center; gap: 5px; margin-top: 6px;
+      padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.04);
+    }
+    .gen-toolbar select, .gen-toolbar button {
+      padding: 4px 7px; border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.04);
+      color: #999; font-size: 10px; cursor: pointer; outline: none;
+      white-space: nowrap; line-height: 1.2;
+    }
+    .gen-toolbar select:hover, .gen-toolbar button:hover { background: rgba(255,255,255,0.08); color: #ddd; }
+    .gen-toolbar .spacer { flex: 1; }
+    .gen-toolbar .cost { font-size: 10px; color: #666; display: flex; align-items: center; gap: 3px; }
+    .gen-toolbar .magic-btn {
+      display: inline-block; color: var(--node-color); border-color: rgba(255,255,255,0.1);
+      padding: 0 8px;
+    }
+    .gen-toolbar .magic-btn:hover { background: rgba(255,255,255,0.08); }
+    .gen-toolbar .send-btn {
+      width: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, #6366F1, #8B5CF6); border: none; color: #fff;
+    }
+    .gen-toolbar .send-btn:hover { opacity: 0.9; }
 
     /* 删除按钮 */
     .node-delete {
@@ -424,10 +478,10 @@
     function getDefaultData(type) {
       switch (type) {
         case 'image_input': return { image_url: null };
-        case 'gpt_image': return { prompt:'', hair:'', makeup:'', clothing:'' };
+        case 'gpt_image': return { prompt:'', hair:'', makeup:'', clothing:'', model:'gpt-image-2', ratio:'16:9' };
         case 'remove_bg': return {};
         case 'mask_edit': return { mask_url: null };
-        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16' };
+        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16', channel:'official' };
         default: return {};
       }
     }
@@ -514,7 +568,7 @@
     function renderNode(node) {
       const cfg = NODE_CFG[node.type] || { icon:'📦', title:node.type, color:'#555' };
       const el = document.createElement('div');
-      el.className = 'node';
+      el.className = 'node' + (node.type === 'gpt_image' || node.type === 'seedance_video' ? ' gen-node' : '');
       el.style.left = node.x + 'px'; el.style.top = node.y + 'px';
       el.style.setProperty('--node-color', cfg.color);
       el.dataset.id = node.id;
@@ -549,11 +603,33 @@
         html += `<label class="upload-btn" for="upload-${node.id}"><span>📤 上传图片</span></label>
           <input id="upload-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadImage('${node.id}',this)" />`;
       } else if (node.type === 'gpt_image') {
-        html += `<div><div class="node-label">提示词（可选，留空用换装参数）</div>
-          <textarea class="node-input" placeholder="例：赛博朋克风格..." oninput="updateNodeData('${node.id}','prompt',this.value)">${d.prompt||''}</textarea></div>
-          <div style="display:flex;gap:5px">
-            <div style="flex:1"><div class="node-label">发型</div><input class="node-input" placeholder="微分碎盖" value="${d.hair||''}" oninput="updateNodeData('${node.id}','hair',this.value)" /></div>
-            <div style="flex:1"><div class="node-label">服装</div><input class="node-input" placeholder="机车夹克" value="${d.clothing||''}" oninput="updateNodeData('${node.id}','clothing',this.value)" /></div>
+        const thumb = d.image_url ? `<img src="${d.image_url}" />` : `<span class="gen-thumb-empty">?</span>`;
+        const prompt = d.prompt || getDefaultImagePrompt();
+        html += `
+          <div class="gen-prompt-box">
+            <div class="gen-thumb">${thumb}</div>
+            <div class="gen-textarea-wrap">
+              <textarea placeholder="输入提示词..." oninput="updateNodeData('${node.id}','prompt',this.value); updateCharCount(this)">${prompt}</textarea>
+              <div class="gen-char-count">${prompt.length} / 2500</div>
+            </div>
+          </div>
+          <div class="gen-toolbar">
+            <select class="gen-model" onchange="updateNodeData('${node.id}','model',this.value)">
+              <option value="gpt-image-2">GPT-image2.0（廉价版）</option>
+              <option value="gpt-image-2-official">GPT-image2.0（官方稳定版）</option>
+            </select>
+            <select class="gen-ratio" onchange="updateNodeData('${node.id}','ratio',this.value)">
+              <option value="16:9" ${d.ratio!=='9:16'?'selected':''}>16:9 · 自适应</option>
+              <option value="9:16" ${d.ratio==='9:16'?'selected':''}>9:16 · 自适应</option>
+              <option value="1:1" ${d.ratio==='1:1'?'selected':''}>1:1 · 自适应</option>
+            </select>
+            <div class="spacer"></div>
+            <button class="magic-btn" onclick="polishPrompt('${node.id}')">✨ 润色</button>
+            <div class="cost">💰 ≈0.03元</div>
+          </div>
+          <div style="display:flex;gap:5px;margin-top:4px">
+            <div style="flex:1"><div class="node-label">发型（可选）</div><input class="node-input" placeholder="微分碎盖" value="${d.hair||''}" oninput="updateNodeData('${node.id}','hair',this.value)" /></div>
+            <div style="flex:1"><div class="node-label">服装（可选）</div><input class="node-input" placeholder="机车夹克" value="${d.clothing||''}" oninput="updateNodeData('${node.id}','clothing',this.value)" /></div>
           </div>`;
       } else if (node.type === 'mask_edit') {
         if (d.mask_url) {
@@ -561,32 +637,72 @@
         }
         html += `<div style="font-size:11px;color:var(--c-mask_edit);padding:4px 6px;background:rgba(236,72,153,0.06);border-radius:5px;text-align:center;">双击编辑遮罩</div>`;
       } else if (node.type === 'seedance_video') {
-        html += `<div><div class="node-label">视频描述</div><input class="node-input" placeholder="人物微笑，缓慢转头..." value="${d.prompt||''}" oninput="updateNodeData('${node.id}','prompt',this.value)" /></div>`;
-        html += `<div style="display:flex;gap:5px">
-          <div style="flex:1"><div class="node-label">时长</div>
-            <select class="node-input" onchange="updateNodeData('${node.id}','duration',this.value)">
+        const thumb = d.image_url ? `<img src="${d.image_url}" />` : `<span class="gen-thumb-empty">?</span>`;
+        const prompt = d.prompt || getDefaultVideoPrompt();
+        html += `
+          <div class="gen-prompt-box">
+            <div class="gen-thumb">${thumb}</div>
+            <div class="gen-textarea-wrap">
+              <textarea placeholder="输入视频描述..." oninput="updateNodeData('${node.id}','prompt',this.value); updateCharCount(this)">${prompt}</textarea>
+              <div class="gen-char-count">${prompt.length} / 2500</div>
+            </div>
+          </div>
+          <div class="gen-toolbar">
+            <select class="gen-model" onchange="updateNodeData('${node.id}','channel',this.value)">
+              <option value="official">seedance（官方稳定版）</option>
+              <option value="low_cost">seedance（低价版）</option>
+            </select>
+            <select class="gen-ratio" onchange="updateNodeData('${node.id}','aspect_ratio',this.value)">
+              <option value="9:16" ${d.aspect_ratio!=='16:9'?'selected':''}>9:16 · 自适应</option>
+              <option value="16:9" ${d.aspect_ratio==='16:9'?'selected':''}>16:9 · 自适应</option>
+            </select>
+            <select class="gen-duration" onchange="updateNodeData('${node.id}','duration',this.value)">
               <option value="4" ${d.duration==='4'?'selected':''}>4秒</option>
               <option value="8" ${d.duration==='8'||!d.duration?'selected':''}>8秒</option>
               <option value="10" ${d.duration==='10'?'selected':''}>10秒</option>
               <option value="12" ${d.duration==='12'?'selected':''}>12秒</option>
               <option value="15" ${d.duration==='15'?'selected':''}>15秒</option>
-            </select></div>
-          <div style="flex:1"><div class="node-label">宽高比</div>
-            <select class="node-input" onchange="updateNodeData('${node.id}','aspect_ratio',this.value)">
-              <option value="9:16" ${d.aspect_ratio!=='16:9'?'selected':''}>竖屏 9:16</option>
-              <option value="16:9" ${d.aspect_ratio==='16:9'?'selected':''}>横屏 16:9</option>
-            </select></div>
-        </div>`;
+            </select>
+            <div class="spacer"></div>
+            <div class="cost">💰 ≈0.08元</div>
+          </div>`;
       }
       html += `<div class="node-progress-bar"><div class="fill" id="prog-${node.id}" style="width:0%"></div></div>`;
       if (d._error) html += `<div style="font-size:10px;color:#F87171;padding:3px 5px;background:rgba(239,68,68,0.06);border-radius:4px;">${d._error}</div>`;
       return html;
     }
     function updateNodeData(id, field, val) { const n = canvasData.nodes.find(n=>n.id===id); if(n) n.data[field]=val; autoSave(); }
+    function updateCharCount(el) {
+      const box = el.parentElement;
+      const cnt = box.querySelector('.gen-char-count');
+      if (cnt) cnt.textContent = el.value.length + ' / 2500';
+      autoResizeTextarea(el);
+    }
+    function autoResizeTextarea(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 260) + 'px';
+    }
+    function getDefaultImagePrompt() {
+      return '以图一人物作为唯一主体。\n保持图一人物的：\n五官、脸型、骨相、眼睛形状、鼻子、嘴唇厚度、肤色、年龄感、气质完全不变。\n仅参考图二的穿搭风格。';
+    }
+    function getDefaultVideoPrompt() {
+      return '基于原图生成一段自然动态视频。人物保持五官不变，动作流畅，光影自然，背景协调。';
+    }
+    async function polishPrompt(nodeId) {
+      const node = canvasData.nodes.find(n => n.id === nodeId);
+      if (!node) return;
+      const base = node.data.prompt || getDefaultImagePrompt();
+      const p = base + '\n\n请优化：使用更具体的摄影与光影描述，增强画面质感与商业海报表现力。';
+      node.data.prompt = p;
+      refreshNodePreview(nodeId);
+      autoSave();
+    }
     function refreshNodePreview(id) {
       const node = canvasData.nodes.find(n=>n.id===id); if(!node) return;
       const el = nodeElements[id]; if(!el) return;
       el.querySelector('.node-body').innerHTML = buildNodeBody(node);
+      const ta = el.querySelector('textarea');
+      if (ta) { setTimeout(() => { updateCharCount(ta); }, 0); }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1107,13 +1223,10 @@
 
     // 如果没有自动保存，放示例节点引导用户
     if (canvasData.nodes.length === 0) {
-      addNodeAt('image_input', 300, 250);
-      addNodeAt('gpt_image', 620, 250);
-      if (canvasData.nodes.length >= 2) {
-        canvasData.connections.push({ id: uid(), from: canvasData.nodes[0].id, to: canvasData.nodes[1].id });
-        renderConnections();
-        updateStatusbar();
-      }
+      addNodeAt('image_input', 260, 250);
+      addNodeAt('gpt_image', 760, 250);
+      renderConnections();
+      updateStatusbar();
     }
 
     window.addEventListener('resize', () => renderConnections());
