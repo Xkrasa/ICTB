@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 生成的资产（运行时产物，不入库）
+assets/
+
+# 日志与本地缓存
+*.log
+.DS_Store
