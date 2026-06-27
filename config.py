@@ -16,3 +16,11 @@ GPT_IMAGE_THINKING = os.getenv("GPT_IMAGE_THINKING", "")
 GPT_IMAGE_SIZE = os.getenv("GPT_IMAGE_SIZE", "1024x1024")
 # thinking + high 会很久，HTTP timeout 必须 ≥ 360s
 GPT_IMAGE_TIMEOUT = float(os.getenv("GPT_IMAGE_TIMEOUT", "360"))
+
+# ── RunningHub（seedance 图生视频）──
+RUNNINGHUB_API_KEY = os.getenv("RUNNINGHUB_API_KEY", "")
+RUNNINGHUB_BASE_URL = os.getenv("RUNNINGHUB_BASE_URL", "https://www.runninghub.cn/openapi/v2")
+RUNNINGHUB_TIMEOUT = float(os.getenv("RUNNINGHUB_TIMEOUT", "30"))
+# 视频生成轮询间隔（秒）
+SEEDANCE_POLL_INTERVAL = float(os.getenv("SEEDANCE_POLL_INTERVAL", "5"))
+SEEDANCE_POLL_TIMEOUT = float(os.getenv("SEEDANCE_POLL_TIMEOUT", "600"))  # 10 分钟超时

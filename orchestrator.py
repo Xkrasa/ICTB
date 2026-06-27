@@ -14,7 +14,10 @@ import uuid
 import zlib
 from collections import defaultdict, deque
 
-from clients import gpt_image
+import httpx
+
+import config
+from clients import gpt_image, runninghub
 from storage import storage
 
 # 并发闸：最多 3 个节点同时执行
@@ -341,17 +344,58 @@ async def exec_remove_bg(canvas_id: str, node_id: str, params: dict) -> None:
 
 
 async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> None:
-    """视频生成节点（mock占位）：后续接 seedance API"""
+    """视频生成节点：RunningHub seedance 图生视频。
+
+    流程：下载本地图片 → 上传到 RunningHub → 提交图生视频 → 轮询 → 下载转存。
+    """
+    if not config.RUNNINGHUB_API_KEY:
+        raise ValueError("未配置 RUNNINGHUB_API_KEY，请在 .env 中设置")
+
     ref_url = params.get("image_url")
     if not ref_url:
         raise ValueError("seedance_video 节点缺少输入图片")
+    prompt = params.get("prompt", "")
+    if len(prompt) < 5:
+        prompt = "基于原图生成10秒动态视频，人物自然微笑，缓慢转头。"
+    duration = params.get("duration", "10")
+    aspect_ratio = params.get("aspect_ratio", "9:16")
+
+    # 1. 下载本地图片
+    registry.update(f"{canvas_id}:{node_id}", progress=5)
+    ref_bytes = await storage.download(ref_url)
+
+    # 2. 上传到 RunningHub（获取可访问的 URL）
     registry.update(f"{canvas_id}:{node_id}", progress=10)
-    # mock：模拟视频生成耗时
-    for p in range(20, 101, 20):
-        await asyncio.sleep(0.8)
-        registry.update(f"{canvas_id}:{node_id}", progress=p)
-    # mock 产出：复用输入图作为"视频封面"
-    registry.update(f"{canvas_id}:{node_id}", image_url=ref_url)
+    rh_image_url = await runninghub.upload_image(ref_bytes)
+
+    # 3. 提交图生视频任务
+    registry.update(f"{canvas_id}:{node_id}", progress=15)
+    task_id = await runninghub.image_to_video(
+        rh_image_url, prompt, duration, aspect_ratio
+    )
+
+    # 4. 轮询任务状态（带进度回调）
+    def on_progress(status: str) -> None:
+        # QUEUED → 20%, RUNNING → 30-80%
+        if status == "QUEUED":
+            registry.update(f"{canvas_id}:{node_id}", progress=20)
+        elif status == "RUNNING":
+            cur = registry.get(f"{canvas_id}:{node_id}")
+            p = cur["progress"] if cur else 20
+            registry.update(f"{canvas_id}:{node_id}", progress=min(p + 5, 80))
+
+    registry.update(f"{canvas_id}:{node_id}", progress=20)
+    video_url = await runninghub.wait_for_result(task_id, on_progress)
+
+    # 5. 下载视频并转存（RunningHub URL 24h 过期）
+    registry.update(f"{canvas_id}:{node_id}", progress=85)
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.get(video_url)
+        resp.raise_for_status()
+        video_bytes = resp.content
+
+    url = await storage.save(video_bytes, "mp4")
+    registry.update(f"{canvas_id}:{node_id}", progress=95, image_url=url)
 
 
 _NODE_EXECUTORS: dict = {

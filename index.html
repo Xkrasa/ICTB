@@ -3,233 +3,266 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI 团播资产画布 — Phase 2</title>
+  <title>AI 团播资产画布</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #0d0d0f; color: #e0e0e0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #0a0a0c; color: #e0e0e0; }
+
+    /* ═══════════ 节点类型配色 ═══════════ */
+    :root {
+      --c-image_input: #3B82F6;
+      --c-gpt_image:   #A855F7;
+      --c-remove_bg:   #06B6D4;
+      --c-seedance:    #F59E0B;
+    }
 
     /* ═══════════ 工具栏 ═══════════ */
     #toolbar {
-      position: fixed; top: 0; left: 0; right: 0; height: 52px; z-index: 1000;
-      display: flex; align-items: center; gap: 8px; padding: 0 16px;
-      background: rgba(20, 20, 24, 0.85); backdrop-filter: blur(12px);
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 1000;
+      display: flex; align-items: center; gap: 4px; padding: 0 12px;
+      background: rgba(14, 14, 18, 0.92); backdrop-filter: blur(16px);
+      border-bottom: 1px solid rgba(255,255,255,0.05);
     }
-    #toolbar .logo { font-size: 15px; font-weight: 700; color: #fff; margin-right: 12px; white-space: nowrap; }
+    #toolbar .logo { font-size: 14px; font-weight: 700; color: #fff; margin-right: 8px; white-space: nowrap; letter-spacing: 0.5px; }
+    #toolbar .logo span { color: var(--c-gpt_image); }
+    .tb-divider { width: 1px; height: 24px; background: rgba(255,255,255,0.08); margin: 0 4px; }
     #toolbar .spacer { flex: 1; }
     .tb-btn {
-      display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px;
-      border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);
-      background: rgba(255,255,255,0.04); color: #ccc; font-size: 13px; cursor: pointer;
-      transition: all 0.15s;
+      display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px;
+      border-radius: 7px; border: 1px solid transparent;
+      background: transparent; color: #aaa; font-size: 12px; cursor: pointer;
+      transition: all 0.12s; white-space: nowrap;
     }
-    .tb-btn:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.2); color: #fff; }
-    .tb-btn.primary { background: #4A9EFF; border-color: #4A9EFF; color: #fff; font-weight: 600; }
-    .tb-btn.primary:hover { background: #3A8AEF; }
-    .tb-btn.danger:hover { background: rgba(255,80,80,0.15); border-color: rgba(255,80,80,0.3); color: #ff8080; }
-    .tb-btn .icon { font-size: 15px; }
-    #zoom-display { font-size: 12px; color: #888; min-width: 48px; text-align: center; }
+    .tb-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+    .tb-btn .icon { font-size: 14px; }
+    .tb-btn.add-btn:hover { background: rgba(255,255,255,0.06); }
+    .tb-btn.add-btn[data-type="image_input"]:hover { color: var(--c-image_input); }
+    .tb-btn.add-btn[data-type="gpt_image"]:hover { color: var(--c-gpt_image); }
+    .tb-btn.add-btn[data-type="remove_bg"]:hover { color: var(--c-remove_bg); }
+    .tb-btn.add-btn[data-type="seedance_video"]:hover { color: var(--c-seedance); }
+    .tb-btn.primary {
+      background: linear-gradient(135deg, #6366F1, #8B5CF6); color: #fff; font-weight: 600;
+      border: 1px solid rgba(139,92,246,0.4); box-shadow: 0 2px 8px rgba(99,102,241,0.25);
+    }
+    .tb-btn.primary:hover { background: linear-gradient(135deg, #5558E0, #7B4CE6); box-shadow: 0 4px 12px rgba(99,102,241,0.35); }
+    .tb-btn.danger:hover { background: rgba(239,68,68,0.12); color: #ef4444; }
+    #zoom-display { font-size: 11px; color: #666; min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
 
-    /* ═══════════ 视口层（Viewport） ═══════════ */
+    /* ═══════════ 视口层 ═══════════ */
     #viewport {
-      position: fixed; top: 52px; left: 0; right: 0; bottom: 0;
+      position: fixed; top: 48px; left: 0; right: 0; bottom: 0;
       overflow: hidden; cursor: default;
       background:
-        radial-gradient(ellipse at 30% 20%, rgba(40,40,55,0.5), transparent 60%),
-        radial-gradient(ellipse at 70% 80%, rgba(30,30,50,0.4), transparent 60%),
-        #0d0d0f;
+        radial-gradient(ellipse 800px 600px at 25% 15%, rgba(99,102,241,0.06), transparent),
+        radial-gradient(ellipse 600px 400px at 75% 85%, rgba(168,85,247,0.05), transparent),
+        radial-gradient(ellipse 500px 500px at 50% 50%, rgba(6,182,212,0.03), transparent),
+        #0a0a0c;
     }
     #viewport.panning { cursor: grabbing; }
 
-    /* ═══════════ 画布层（Workspace） ═══════════ */
-    #workspace {
-      position: absolute; top: 0; left: 0; width: 1px; height: 1px;
-      transform-origin: 0 0;
-      will-change: transform;
-    }
+    /* 画布层 */
+    #workspace { position: absolute; top: 0; left: 0; width: 1px; height: 1px; transform-origin: 0 0; will-change: transform; }
 
-    /* 网格背景 */
+    /* 点阵网格背景 */
     #grid-bg {
       position: absolute; top: -5000px; left: -5000px; width: 10000px; height: 10000px;
-      background-image:
-        linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
-      background-size: 40px 40px;
+      background-image: radial-gradient(circle, rgba(255,255,255,0.06) 1px, transparent 1px);
+      background-size: 24px 24px;
       pointer-events: none;
     }
 
     /* SVG 连线层 */
-    #svg-layer {
-      position: absolute; top: 0; left: 0; width: 10000px; height: 10000px;
-      pointer-events: none; overflow: visible;
-    }
-    #svg-layer .conn-path {
-      fill: none; stroke: #555; stroke-width: 2; pointer-events: stroke; cursor: pointer;
-      transition: stroke 0.15s;
-    }
-    #svg-layer .conn-path:hover { stroke: #4A9EFF; stroke-width: 2.5; }
-    #svg-layer .conn-path.selected { stroke: #4A9EFF; stroke-width: 3; }
-    #svg-layer .conn-temp {
-      fill: none; stroke: #4A9EFF; stroke-width: 2; stroke-dasharray: 6 4; pointer-events: none;
-    }
+    #svg-layer { position: absolute; top: 0; left: 0; width: 10000px; height: 10000px; pointer-events: none; overflow: visible; }
+    #svg-layer .conn-path { fill: none; stroke: rgba(120,120,130,0.4); stroke-width: 2; pointer-events: stroke; cursor: pointer; transition: stroke 0.15s; }
+    #svg-layer .conn-path:hover { stroke: #6366F1; stroke-width: 2.5; }
+    #svg-layer .conn-path.selected { stroke: #6366F1; stroke-width: 2.5; filter: drop-shadow(0 0 4px rgba(99,102,241,0.5)); }
+    #svg-layer .conn-path.running { stroke: #6366F1; stroke-width: 2.5; stroke-dasharray: 8 4; animation: flow 0.6s linear infinite; filter: drop-shadow(0 0 4px rgba(99,102,241,0.4)); }
+    #svg-layer .conn-temp { fill: none; stroke: #6366F1; stroke-width: 2; stroke-dasharray: 6 4; pointer-events: none; }
+    @keyframes flow { to { stroke-dashoffset: -12; } }
 
     /* ═══════════ 节点层 ═══════════ */
     #nodes-layer { position: absolute; top: 0; left: 0; }
 
-    /* ─── 节点卡片（参考 RunningHub 玻璃态） ─── */
     .node {
-      position: absolute; min-width: 220px; max-width: 280px;
-      background: rgba(30, 30, 35, 0.72); backdrop-filter: blur(10px);
-      border: 1.5px solid rgba(103, 103, 104, 0.5); border-radius: 12px;
+      position: absolute; min-width: 210px; max-width: 270px;
+      background: rgba(22, 22, 28, 0.82); backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.07); border-radius: 10px;
+      border-left: 3px solid var(--node-color, #555);
       overflow: hidden; user-select: none;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
       transition: border-color 0.15s, box-shadow 0.15s;
     }
-    .node:hover { border-color: rgba(120, 120, 130, 0.7); }
-    .node.selected { border-color: #4A9EFF; box-shadow: 0 0 0 1px #4A9EFF, 0 8px 24px rgba(74,158,255,0.15); }
+    .node:hover { border-color: rgba(255,255,255,0.15); box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+    .node.selected { border-color: var(--node-color); box-shadow: 0 0 0 1px var(--node-color), 0 8px 24px rgba(0,0,0,0.4); }
     .node.dragging { opacity: 0.85; }
 
     .node-header {
-      display: flex; align-items: center; gap: 8px; padding: 10px 12px;
-      font-size: 13px; font-weight: 600; cursor: grab;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
+      display: flex; align-items: center; gap: 7px; padding: 8px 10px;
+      font-size: 12px; font-weight: 600; cursor: grab;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
     }
     .node-header:active { cursor: grabbing; }
-    .node-header .node-icon { font-size: 16px; }
-    .node-header .node-title { flex: 1; color: #e0e0e0; }
-    .node-header .node-badge {
-      font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 500;
-      background: rgba(255,255,255,0.08); color: #999;
+    .node-header .node-icon {
+      font-size: 14px; width: 22px; height: 22px; border-radius: 5px;
+      display: flex; align-items: center; justify-content: center;
+      background: color-mix(in srgb, var(--node-color) 18%, transparent);
     }
-    .node-header .node-badge.running { background: rgba(74,158,255,0.2); color: #4A9EFF; }
-    .node-header .node-badge.success { background: rgba(80,200,120,0.2); color: #50C878; }
-    .node-header .node-badge.failed { background: rgba(255,80,80,0.2); color: #FF5050; }
-    .node-header .node-badge.blocked { background: rgba(255,160,0,0.2); color: #FFA000; }
+    .node-header .node-title { flex: 1; color: #ddd; }
+    .node-header .node-badge {
+      font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 500;
+      background: rgba(255,255,255,0.06); color: #777; letter-spacing: 0.3px;
+    }
+    .node-header .node-badge.running { background: rgba(99,102,241,0.18); color: #818CF8; }
+    .node-header .node-badge.success { background: rgba(16,185,129,0.18); color: #34D399; }
+    .node-header .node-badge.failed { background: rgba(239,68,68,0.18); color: #F87171; }
+    .node-header .node-badge.blocked { background: rgba(245,158,11,0.18); color: #FBBF24; }
 
-    .node-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .node-body { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 
     /* 端口 */
     .port {
-      position: absolute; width: 14px; height: 14px; border-radius: 50%;
-      border: 2px solid rgba(103,103,104,0.6); background: #1a1a1e;
-      cursor: crosshair; z-index: 10; transition: all 0.15s;
+      position: absolute; width: 12px; height: 12px; border-radius: 50%;
+      border: 2px solid var(--node-color, #555); background: #0a0a0c;
+      cursor: crosshair; z-index: 10; transition: all 0.12s;
     }
-    .port:hover { border-color: #4A9EFF; background: #4A9EFF; transform: scale(1.2); }
-    .port.port-in { left: -7px; top: 50%; transform: translateY(-50%); }
-    .port.port-in:hover { transform: translateY(-50%) scale(1.2); }
-    .port.port-out { right: -7px; top: 50%; transform: translateY(-50%); }
-    .port.port-out:hover { transform: translateY(-50%) scale(1.2); }
+    .port:hover { background: var(--node-color); transform: scale(1.3); box-shadow: 0 0 8px var(--node-color); }
+    .port.port-in { left: -6px; top: 50%; transform: translateY(-50%); }
+    .port.port-in:hover { transform: translateY(-50%) scale(1.3); }
+    .port.port-out { right: -6px; top: 50%; transform: translateY(-50%); }
+    .port.port-out:hover { transform: translateY(-50%) scale(1.3); }
 
-    /* 节点输入控件 */
+    /* 输入控件 */
     .node-input {
-      width: 100%; padding: 6px 8px; font-size: 12px;
-      background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 6px; color: #ddd; outline: none; transition: border-color 0.15s;
+      width: 100%; padding: 5px 7px; font-size: 11px;
+      background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 5px; color: #ccc; outline: none; transition: border-color 0.12s;
     }
-    .node-input:focus { border-color: #4A9EFF; }
-    .node-input::placeholder { color: #555; }
-    textarea.node-input { resize: vertical; min-height: 50px; font-family: inherit; }
-    .node-label { font-size: 11px; color: #888; margin-bottom: 2px; }
+    .node-input:focus { border-color: var(--node-color); background: rgba(0,0,0,0.45); }
+    .node-input::placeholder { color: #444; }
+    textarea.node-input { resize: vertical; min-height: 44px; font-family: inherit; }
+    .node-label { font-size: 10px; color: #666; margin-bottom: 1px; }
 
-    /* 节点预览图 */
+    /* 预览图 */
     .node-preview {
-      width: 100%; height: 120px; border-radius: 8px; overflow: hidden;
+      width: 100%; height: 110px; border-radius: 6px; overflow: hidden;
       background: rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center;
-      position: relative;
+      position: relative; border: 1px solid rgba(255,255,255,0.04);
     }
-    .node-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
-    .node-preview .preview-placeholder { color: #444; font-size: 28px; }
+    .node-preview img { max-width: 100%; max-height: 100%; object-fit: contain; position: relative; z-index: 1; }
+    .node-preview .preview-placeholder { color: #333; font-size: 24px; z-index: 1; }
     .node-preview .checkerboard {
       position: absolute; inset: 0;
       background-image:
-        linear-gradient(45deg, #222 25%, transparent 25%),
-        linear-gradient(-45deg, #222 25%, transparent 25%),
-        linear-gradient(45deg, transparent 75%, #222 75%),
-        linear-gradient(-45deg, transparent 75%, #222 75%);
-      background-size: 12px 12px; background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+        linear-gradient(45deg, #18181c 25%, transparent 25%),
+        linear-gradient(-45deg, #18181c 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #18181c 75%),
+        linear-gradient(-45deg, transparent 75%, #18181c 75%);
+      background-size: 10px 10px; background-position: 0 0, 0 5px, 5px -5px, -5px 0;
       z-index: 0;
     }
-    .node-preview img { position: relative; z-index: 1; }
 
     /* 进度条 */
-    .node-progress-bar {
-      height: 3px; border-radius: 2px; background: rgba(255,255,255,0.05); overflow: hidden;
-    }
-    .node-progress-bar .fill {
-      height: 100%; background: linear-gradient(90deg, #4A9EFF, #7AB8FF); transition: width 0.3s;
-    }
-    .node-progress-bar .fill.success { background: linear-gradient(90deg, #50C878, #70E090); }
-    .node-progress-bar .fill.failed { background: linear-gradient(90deg, #FF5050, #FF7070); }
+    .node-progress-bar { height: 2px; border-radius: 1px; background: rgba(255,255,255,0.04); overflow: hidden; }
+    .node-progress-bar .fill { height: 100%; background: var(--node-color); transition: width 0.3s; border-radius: 1px; }
+    .node-progress-bar .fill.running { animation: pulse 1.5s ease-in-out infinite; }
+    .node-progress-bar .fill.success { background: #10B981; }
+    .node-progress-bar .fill.failed { background: #EF4444; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-    /* 节点删除按钮 */
+    /* 删除按钮 */
     .node-delete {
-      position: absolute; top: 8px; right: 8px; width: 18px; height: 18px;
-      border-radius: 50%; border: none; background: rgba(255,80,80,0.2); color: #ff8080;
-      font-size: 12px; cursor: pointer; display: none; align-items: center; justify-content: center;
-      line-height: 1;
+      position: absolute; top: 6px; right: 6px; width: 16px; height: 16px;
+      border-radius: 4px; border: none; background: rgba(239,68,68,0.15); color: #F87171;
+      font-size: 10px; cursor: pointer; display: none; align-items: center; justify-content: center; line-height: 1;
     }
     .node:hover .node-delete { display: flex; }
-    .node-delete:hover { background: rgba(255,80,80,0.35); }
+    .node-delete:hover { background: rgba(239,68,68,0.3); }
 
     /* 上传按钮 */
     .upload-btn {
-      display: flex; align-items: center; justify-content: center; gap: 6px;
-      padding: 8px; border: 1px dashed rgba(255,255,255,0.15); border-radius: 8px;
-      cursor: pointer; font-size: 12px; color: #888; transition: all 0.15s;
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+      padding: 6px; border: 1px dashed rgba(255,255,255,0.1); border-radius: 6px;
+      cursor: pointer; font-size: 11px; color: #666; transition: all 0.12s;
     }
-    .upload-btn:hover { border-color: #4A9EFF; color: #4A9EFF; }
+    .upload-btn:hover { border-color: var(--c-image_input); color: var(--c-image_input); }
 
     /* ═══════════ 右键菜单 ═══════════ */
     #context-menu {
-      position: fixed; z-index: 2000; min-width: 160px;
-      background: rgba(30,30,35,0.95); backdrop-filter: blur(12px);
-      border: 1px solid rgba(255,255,255,0.1); border-radius: 10px;
-      padding: 6px; display: none;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      position: fixed; z-index: 2000; min-width: 150px;
+      background: rgba(22,22,28,0.95); backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+      padding: 4px; display: none; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     }
     #context-menu .menu-item {
-      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-      border-radius: 6px; font-size: 13px; cursor: pointer; color: #ccc;
+      display: flex; align-items: center; gap: 7px; padding: 7px 10px;
+      border-radius: 5px; font-size: 12px; cursor: pointer; color: #aaa;
       transition: background 0.1s;
     }
-    #context-menu .menu-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
-    #context-menu .menu-item .mi-icon { font-size: 16px; width: 20px; text-align: center; }
+    #context-menu .menu-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
+    #context-menu .menu-item .mi-icon { font-size: 14px; width: 18px; text-align: center; }
+
+    /* ═══════════ 画布列表弹窗 ═══════════ */
+    #canvas-modal {
+      position: fixed; z-index: 3000; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5); backdrop-filter: blur(4px);
+      display: none; align-items: center; justify-content: center;
+    }
+    #canvas-modal .modal-box {
+      width: 420px; max-height: 60vh; overflow-y: auto;
+      background: rgba(22,22,28,0.95); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px; padding: 20px;
+    }
+    #canvas-modal .modal-title { font-size: 15px; font-weight: 600; color: #fff; margin-bottom: 12px; }
+    #canvas-modal .canvas-item {
+      display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+      border-radius: 7px; cursor: pointer; transition: background 0.1s;
+      border: 1px solid rgba(255,255,255,0.04); margin-bottom: 4px;
+    }
+    #canvas-modal .canvas-item:hover { background: rgba(255,255,255,0.06); }
+    #canvas-modal .canvas-item .ci-name { flex: 1; font-size: 13px; color: #ddd; }
+    #canvas-modal .canvas-item .ci-meta { font-size: 10px; color: #555; }
+    #canvas-modal .close-btn { position: absolute; top: 16px; right: 16px; cursor: pointer; color: #555; font-size: 18px; }
 
     /* ═══════════ 状态栏 ═══════════ */
     #statusbar {
-      position: fixed; bottom: 0; left: 0; right: 0; height: 28px; z-index: 1000;
-      display: flex; align-items: center; gap: 16px; padding: 0 16px;
-      background: rgba(20,20,24,0.85); backdrop-filter: blur(12px);
+      position: fixed; bottom: 0; left: 0; right: 0; height: 24px; z-index: 1000;
+      display: flex; align-items: center; gap: 12px; padding: 0 12px;
+      background: rgba(14,14,18,0.92); backdrop-filter: blur(16px);
       border-top: 1px solid rgba(255,255,255,0.04);
-      font-size: 11px; color: #666;
+      font-size: 10px; color: #555;
     }
-    #statusbar .sb-item { display: flex; align-items: center; gap: 4px; }
-    #statusbar .sb-dot { width: 6px; height: 6px; border-radius: 50%; background: #444; }
-    #statusbar .sb-dot.running { background: #4A9EFF; box-shadow: 0 0 6px #4A9EFF; }
-    #statusbar .sb-dot.success { background: #50C878; }
-    #statusbar .sb-dot.failed { background: #FF5050; }
+    #statusbar .sb-item { display: flex; align-items: center; gap: 3px; }
+    #statusbar .sb-dot { width: 5px; height: 5px; border-radius: 50%; background: #333; }
+    #statusbar .sb-dot.running { background: #6366F1; box-shadow: 0 0 5px #6366F1; }
+    #statusbar .sb-dot.success { background: #10B981; }
+    #statusbar .sb-dot.failed { background: #EF4444; }
   </style>
 </head>
 <body>
 
   <!-- ═══════════ 工具栏 ═══════════ -->
   <div id="toolbar">
-    <span class="logo">🎬 AI 团播资产画布</span>
-    <button class="tb-btn" onclick="addNode('image_input')"><span class="icon">🖼️</span>图片输入</button>
-    <button class="tb-btn" onclick="addNode('gpt_image')"><span class="icon">✨</span>AI 生图</button>
-    <button class="tb-btn" onclick="addNode('remove_bg')"><span class="icon">✂️</span>抠图</button>
-    <button class="tb-btn" onclick="addNode('seedance_video')"><span class="icon">🎬</span>视频生成</button>
+    <span class="logo">🎬 AI 团播<span>画布</span></span>
+    <div class="tb-divider"></div>
+    <button class="tb-btn add-btn" data-type="image_input" onclick="addNode('image_input')"><span class="icon">🖼️</span>图片输入</button>
+    <button class="tb-btn add-btn" data-type="gpt_image" onclick="addNode('gpt_image')"><span class="icon">✨</span>AI 生图</button>
+    <button class="tb-btn add-btn" data-type="remove_bg" onclick="addNode('remove_bg')"><span class="icon">✂️</span>抠图</button>
+    <button class="tb-btn add-btn" data-type="seedance_video" onclick="addNode('seedance_video')"><span class="icon">🎬</span>视频生成</button>
+    <div class="tb-divider"></div>
+    <button class="tb-btn" onclick="saveCanvas()"><span class="icon">💾</span>保存</button>
+    <button class="tb-btn" onclick="loadCanvasList()"><span class="icon">📂</span>加载</button>
     <div class="spacer"></div>
     <span id="zoom-display">100%</span>
     <button class="tb-btn" onclick="zoomBy(1.2)" title="放大">+</button>
     <button class="tb-btn" onclick="zoomBy(0.8)" title="缩小">−</button>
     <button class="tb-btn" onclick="resetView()" title="复位">⌂</button>
+    <div class="tb-divider"></div>
     <button class="tb-btn danger" onclick="clearCanvas()">清空</button>
-    <button class="tb-btn primary" onclick="runCanvas()">▶ 运行画布</button>
+    <button class="tb-btn primary" onclick="runCanvas()">▶ 运行</button>
   </div>
 
   <!-- ═══════════ 视口层 ═══════════ -->
   <div id="viewport">
-    <!-- 画布层 -->
     <div id="workspace">
       <div id="grid-bg"></div>
       <svg id="svg-layer"></svg>
@@ -245,383 +278,267 @@
     <div class="menu-item" onclick="addNodeAt('seedance_video', ctxPos.x, ctxPos.y)"><span class="mi-icon">🎬</span>视频生成</div>
   </div>
 
+  <!-- 画布列表弹窗 -->
+  <div id="canvas-modal" onclick="if(event.target===this)closeModal()">
+    <div class="modal-box" style="position:relative">
+      <span class="close-btn" onclick="closeModal()">✕</span>
+      <div class="modal-title">已保存的画布</div>
+      <div id="canvas-list-body"></div>
+    </div>
+  </div>
+
   <!-- 状态栏 -->
   <div id="statusbar">
     <div class="sb-item"><span class="sb-dot" id="sb-dot"></span><span id="sb-status">就绪</span></div>
-    <div class="sb-item"><span>节点: <span id="sb-nodes">0</span></span></div>
-    <div class="sb-item"><span>连线: <span id="sb-conns">0</span></span></div>
+    <div class="sb-item">节点: <span id="sb-nodes">0</span></div>
+    <div class="sb-item">连线: <span id="sb-conns">0</span></div>
     <div style="flex:1"></div>
-    <div class="sb-item" style="color:#555">右键画布添加节点 · 拖端口连线 · 滚轮缩放 · 中键/空格+左键平移</div>
+    <div class="sb-item" style="color:#444">右键添加节点 · 拖端口连线 · 滚轮缩放 · 中键/空格平移</div>
   </div>
 
   <script>
     // ═══════════════════════════════════════════════════════════════
-    // 数据模型：canvasData 驱动一切（参考 ComfyUI / Drawflow）
+    // 数据模型
     // ═══════════════════════════════════════════════════════════════
     let canvasData = { nodes: [], connections: [] };
-    let selectedNode = null;
-    let selectedConn = null;
+    let selectedNode = null, selectedConn = null;
     let currentCanvasId = null;
     const pollTimers = {};
-    const nodeElements = {};  // id -> DOM element
+    const nodeElements = {};
 
-    // 视口状态：平移 + 缩放
-    let viewX = 100, viewY = 80, viewScale = 1;
+    let viewX = 100, viewY = 70, viewScale = 1;
     let isPanning = false, panStart = null;
-    let isDraggingNode = false, dragNode = null, dragOffset = null;
-    let isConnecting = false, connStart = null, connStartPort = null;
+    let isConnecting = false, connStart = null;
 
-    const NODE_ICONS = {
-      image_input: '🖼️', gpt_image: '✨', remove_bg: '✂️', seedance_video: '🎬'
+    const NODE_CFG = {
+      image_input:   { icon: '🖼️', title: '图片输入', color: 'var(--c-image_input)' },
+      gpt_image:     { icon: '✨', title: 'AI 生图',  color: 'var(--c-gpt_image)' },
+      remove_bg:     { icon: '✂️', title: '抠图',     color: 'var(--c-remove_bg)' },
+      seedance_video:{ icon: '🎬', title: '视频生成', color: 'var(--c-seedance)' },
     };
-    const NODE_TITLES = {
-      image_input: '图片输入', gpt_image: 'AI 生图', remove_bg: '抠图', seedance_video: '视频生成'
-    };
-    const STATUS_LABELS = {
-      idle: '待机', pending: '排队', running: '运行中', success: '完成', failed: '失败', blocked: '阻断'
-    };
+    const STATUS_LABELS = { idle:'待机', pending:'排队', running:'运行中', success:'完成', failed:'失败', blocked:'阻断' };
 
     function uid() { return Math.random().toString(36).slice(2, 10); }
 
     // ═══════════════════════════════════════════════════════════════
-    // 视口变换：applyTransform — 只改 CSS transform，节点坐标不变
+    // 视口变换
     // ═══════════════════════════════════════════════════════════════
     function applyTransform() {
-      const ws = document.getElementById('workspace');
-      ws.style.transform = `translate(${viewX}px, ${viewY}px) scale(${viewScale})`;
+      document.getElementById('workspace').style.transform = `translate(${viewX}px,${viewY}px) scale(${viewScale})`;
       document.getElementById('zoom-display').textContent = Math.round(viewScale * 100) + '%';
     }
-
-    function resetView() {
-      viewX = 100; viewY = 80; viewScale = 1;
+    function resetView() { viewX = 100; viewY = 70; viewScale = 1; applyTransform(); }
+    function zoomBy(f) {
+      const r = document.getElementById('viewport').getBoundingClientRect();
+      const cx = r.width/2, cy = r.height/2;
+      const wx = (cx-viewX)/viewScale, wy = (cy-viewY)/viewScale;
+      viewScale = Math.max(0.2, Math.min(3, viewScale*f));
+      viewX = cx - wx*viewScale; viewY = cy - wy*viewScale;
       applyTransform();
     }
-
-    function zoomBy(factor) {
-      const vp = document.getElementById('viewport');
-      const rect = vp.getBoundingClientRect();
-      const cx = rect.width / 2;
-      const cy = rect.height / 2;
-      // 以视口中心为缩放原点
-      const wx = (cx - viewX) / viewScale;
-      const wy = (cy - viewY) / viewScale;
-      viewScale = Math.max(0.2, Math.min(3, viewScale * factor));
-      viewX = cx - wx * viewScale;
-      viewY = cy - wy * viewScale;
-      applyTransform();
-    }
-
-    // 屏幕坐标 → 画布坐标
-    function screenToCanvas(sx, sy) {
-      return {
-        x: (sx - viewX) / viewScale,
-        y: (sy - viewY) / viewScale
-      };
-    }
+    function screenToCanvas(sx, sy) { return { x: (sx-viewX)/viewScale, y: (sy-viewY)/viewScale }; }
 
     // ═══════════════════════════════════════════════════════════════
     // 节点管理
     // ═══════════════════════════════════════════════════════════════
     function addNode(type) {
-      // 在视口中心添加
-      const vp = document.getElementById('viewport');
-      const rect = vp.getBoundingClientRect();
-      const c = screenToCanvas(rect.width / 2, rect.height / 2);
+      const r = document.getElementById('viewport').getBoundingClientRect();
+      const c = screenToCanvas(r.width/2, r.height/2);
       addNodeAt(type, c.x, c.y);
     }
-
     function addNodeAt(type, x, y) {
-      const node = {
-        id: uid(),
-        type,
-        x: x - 110,  // 居中
-        y: y - 60,
-        data: getDefaultData(type)
-      };
+      const node = { id: uid(), type, x: x-105, y: y-50, data: getDefaultData(type) };
       canvasData.nodes.push(node);
       renderNode(node);
       updateStatusbar();
       hideContextMenu();
+      autoSave();
     }
-
     function getDefaultData(type) {
       switch (type) {
-        case 'image_input':
-          return { image_url: null };
-        case 'gpt_image':
-          return { prompt: '', hair: '', makeup: '', clothing: '' };
-        case 'remove_bg':
-          return {};
-        case 'seedance_video':
-          return { prompt: '' };
-        default:
-          return {};
+        case 'image_input': return { image_url: null };
+        case 'gpt_image': return { prompt:'', hair:'', makeup:'', clothing:'' };
+        case 'remove_bg': return {};
+        case 'seedance_video': return { prompt:'', duration:'10', aspect_ratio:'9:16' };
+        default: return {};
       }
     }
-
     function removeNode(id) {
-      // 删除连线
       canvasData.connections = canvasData.connections.filter(c => c.from !== id && c.to !== id);
-      // 删除节点
       canvasData.nodes = canvasData.nodes.filter(n => n.id !== id);
-      // 删除 DOM
-      if (nodeElements[id]) {
-        nodeElements[id].remove();
-        delete nodeElements[id];
-      }
+      if (nodeElements[id]) { nodeElements[id].remove(); delete nodeElements[id]; }
       if (selectedNode === id) selectedNode = null;
       stopPolling(id);
       renderConnections();
       updateStatusbar();
+      autoSave();
     }
-
     function clearCanvas() {
       canvasData.nodes.forEach(n => stopPolling(n.id));
       canvasData = { nodes: [], connections: [] };
       Object.values(nodeElements).forEach(el => el.remove());
       Object.keys(nodeElements).forEach(k => delete nodeElements[k]);
-      selectedNode = null;
-      currentCanvasId = null;
-      renderConnections();
-      updateStatusbar();
+      selectedNode = null; currentCanvasId = null;
+      renderConnections(); updateStatusbar();
+      localStorage.removeItem('autosave');
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 节点渲染（纯 HTML DOM，参考 Drawflow）
+    // 节点渲染
     // ═══════════════════════════════════════════════════════════════
     function renderNode(node) {
+      const cfg = NODE_CFG[node.type] || { icon:'📦', title:node.type, color:'#555' };
       const el = document.createElement('div');
       el.className = 'node';
-      el.style.left = node.x + 'px';
-      el.style.top = node.y + 'px';
+      el.style.left = node.x + 'px'; el.style.top = node.y + 'px';
+      el.style.setProperty('--node-color', cfg.color);
       el.dataset.id = node.id;
-      el.innerHTML = buildNodeHTML(node);
+      el.innerHTML = buildNodeHTML(node, cfg);
       document.getElementById('nodes-layer').appendChild(el);
       nodeElements[node.id] = el;
-
       bindNodeEvents(el, node);
       return el;
     }
-
-    function buildNodeHTML(node) {
-      const icon = NODE_ICONS[node.type] || '📦';
-      const title = NODE_TITLES[node.type] || node.type;
-      const body = buildNodeBody(node);
-      // image_input 没有输入端口；其他类型有
+    function buildNodeHTML(node, cfg) {
       const inPort = node.type === 'image_input' ? '' : '<div class="port port-in" data-port="in"></div>';
-      // seedance_video 没有输出端口（暂时）；其他有
       const outPort = '<div class="port port-out" data-port="out"></div>';
-
-      return `
-        ${inPort}
-        ${outPort}
+      return `${inPort}${outPort}
         <button class="node-delete" onclick="removeNode('${node.id}')">✕</button>
         <div class="node-header" data-id="${node.id}">
-          <span class="node-icon">${icon}</span>
-          <span class="node-title">${title}</span>
+          <span class="node-icon">${cfg.icon}</span>
+          <span class="node-title">${cfg.title}</span>
           <span class="node-badge" id="badge-${node.id}">待机</span>
         </div>
-        <div class="node-body">${body}</div>
-      `;
+        <div class="node-body">${buildNodeBody(node)}</div>`;
     }
-
     function buildNodeBody(node) {
       const d = node.data;
       let html = '';
-
-      // 预览图（所有节点通用）
       if (d.image_url) {
         html += `<div class="node-preview"><div class="checkerboard"></div><img src="${d.image_url}" /></div>`;
       } else {
-        html += `<div class="node-preview"><div class="checkerboard"></div><span class="preview-placeholder">${NODE_ICONS[node.type]}</span></div>`;
+        const cfg = NODE_CFG[node.type] || { icon:'📦' };
+        html += `<div class="node-preview"><div class="checkerboard"></div><span class="preview-placeholder">${cfg.icon}</span></div>`;
       }
-
-      // 节点特定控件
       if (node.type === 'image_input') {
-        html += `
-          <label class="upload-btn" for="upload-${node.id}">
-            <span>📤 上传图片</span>
-          </label>
-          <input id="upload-${node.id}" type="file" accept="image/*" style="display:none"
-            onchange="uploadImage('${node.id}', this)" />
-        `;
+        html += `<label class="upload-btn" for="upload-${node.id}"><span>📤 上传图片</span></label>
+          <input id="upload-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadImage('${node.id}',this)" />`;
       } else if (node.type === 'gpt_image') {
-        html += `
-          <div>
-            <div class="node-label">提示词（可选，留空则用换装参数）</div>
-            <textarea class="node-input" placeholder="例：将人物换成赛博朋克风格..."
-              oninput="updateNodeData('${node.id}','prompt',this.value)">${d.prompt || ''}</textarea>
-          </div>
-          <div style="display:flex;gap:6px">
-            <div style="flex:1">
-              <div class="node-label">发型</div>
-              <input class="node-input" placeholder="微分碎盖" value="${d.hair || ''}"
-                oninput="updateNodeData('${node.id}','hair',this.value)" />
-            </div>
-            <div style="flex:1">
-              <div class="node-label">服装</div>
-              <input class="node-input" placeholder="机车夹克" value="${d.clothing || ''}"
-                oninput="updateNodeData('${node.id}','clothing',this.value)" />
-            </div>
-          </div>
-        `;
+        html += `<div><div class="node-label">提示词（可选，留空用换装参数）</div>
+          <textarea class="node-input" placeholder="例：赛博朋克风格..." oninput="updateNodeData('${node.id}','prompt',this.value)">${d.prompt||''}</textarea></div>
+          <div style="display:flex;gap:5px">
+            <div style="flex:1"><div class="node-label">发型</div><input class="node-input" placeholder="微分碎盖" value="${d.hair||''}" oninput="updateNodeData('${node.id}','hair',this.value)" /></div>
+            <div style="flex:1"><div class="node-label">服装</div><input class="node-input" placeholder="机车夹克" value="${d.clothing||''}" oninput="updateNodeData('${node.id}','clothing',this.value)" /></div>
+          </div>`;
       } else if (node.type === 'seedance_video') {
-        html += `
-          <div>
-            <div class="node-label">视频描述</div>
-            <input class="node-input" placeholder="人物微笑，缓慢转头..."
-              value="${d.prompt || ''}" oninput="updateNodeData('${node.id}','prompt',this.value)" />
-          </div>
-        `;
+        html += `<div><div class="node-label">视频描述</div><input class="node-input" placeholder="人物微笑，缓慢转头..." value="${d.prompt||''}" oninput="updateNodeData('${node.id}','prompt',this.value)" /></div>`;
+        html += `<div style="display:flex;gap:5px">
+          <div style="flex:1"><div class="node-label">时长</div>
+            <select class="node-input" onchange="updateNodeData('${node.id}','duration',this.value)">
+              <option value="10" ${d.duration!=='15'?'selected':''}>10秒</option>
+              <option value="15" ${d.duration==='15'?'selected':''}>15秒</option>
+            </select></div>
+          <div style="flex:1"><div class="node-label">宽高比</div>
+            <select class="node-input" onchange="updateNodeData('${node.id}','aspect_ratio',this.value)">
+              <option value="9:16" ${d.aspect_ratio!=='16:9'?'selected':''}>竖屏 9:16</option>
+              <option value="16:9" ${d.aspect_ratio==='16:9'?'selected':''}>横屏 16:9</option>
+            </select></div>
+        </div>`;
       }
-
-      // 进度条
-      html += `
-        <div class="node-progress-bar">
-          <div class="fill" id="prog-${node.id}" style="width:0%"></div>
-        </div>
-      `;
-
-      // 错误信息
-      if (d._error) {
-        html += `<div style="font-size:11px;color:#ff6060;padding:4px 6px;background:rgba(255,80,80,0.08);border-radius:4px;">${d._error}</div>`;
-      }
-
+      html += `<div class="node-progress-bar"><div class="fill" id="prog-${node.id}" style="width:0%"></div></div>`;
+      if (d._error) html += `<div style="font-size:10px;color:#F87171;padding:3px 5px;background:rgba(239,68,68,0.06);border-radius:4px;">${d._error}</div>`;
       return html;
     }
-
-    function updateNodeData(nodeId, field, value) {
-      const node = canvasData.nodes.find(n => n.id === nodeId);
-      if (node) node.data[field] = value;
-    }
-
-    function refreshNodePreview(nodeId) {
-      const node = canvasData.nodes.find(n => n.id === nodeId);
-      if (!node) return;
-      const el = nodeElements[nodeId];
-      if (!el) return;
-      const body = el.querySelector('.node-body');
-      body.innerHTML = buildNodeBody(node);
-      // 重新绑定上传事件等
+    function updateNodeData(id, field, val) { const n = canvasData.nodes.find(n=>n.id===id); if(n) n.data[field]=val; autoSave(); }
+    function refreshNodePreview(id) {
+      const node = canvasData.nodes.find(n=>n.id===id); if(!node) return;
+      const el = nodeElements[id]; if(!el) return;
+      el.querySelector('.node-body').innerHTML = buildNodeBody(node);
     }
 
     // ═══════════════════════════════════════════════════════════════
     // 图片上传
     // ═══════════════════════════════════════════════════════════════
     async function uploadImage(nodeId, input) {
-      const file = input.files[0];
-      if (!file) return;
-      const fd = new FormData();
-      fd.append('file', file);
+      const file = input.files[0]; if(!file) return;
+      const fd = new FormData(); fd.append('file', file);
       try {
-        const resp = await fetch('/api/assets/upload', { method: 'POST', body: fd });
-        const data = await resp.json();
-        const node = canvasData.nodes.find(n => n.id === nodeId);
-        if (node) {
-          node.data.image_url = data.url;
-          refreshNodePreview(nodeId);
-        }
-      } catch (e) {
-        alert('上传失败: ' + e.message);
-      }
+        const r = await fetch('/api/assets/upload', { method:'POST', body:fd });
+        const d = await r.json();
+        const node = canvasData.nodes.find(n=>n.id===nodeId);
+        if (node) { node.data.image_url = d.url; refreshNodePreview(nodeId); autoSave(); }
+      } catch(e) { alert('上传失败: '+e.message); }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 连线渲染（SVG 贝塞尔曲线，参考 Drawflow）
+    // 连线渲染（SVG 贝塞尔曲线）
     // ═══════════════════════════════════════════════════════════════
     function renderConnections() {
       const svg = document.getElementById('svg-layer');
-      // 保留临时连线
       const temp = svg.querySelector('.conn-temp');
       svg.innerHTML = '';
       if (temp) svg.appendChild(temp);
-
       for (const conn of canvasData.connections) {
-        const fromNode = canvasData.nodes.find(n => n.id === conn.from);
-        const toNode = canvasData.nodes.find(n => n.id === conn.to);
-        if (!fromNode || !toNode) continue;
-
-        const fromEl = nodeElements[conn.from];
-        const toEl = nodeElements[conn.to];
-        if (!fromEl || !toEl) continue;
-
-        // 输出端口：节点右侧中部
-        const x1 = fromNode.x + fromEl.offsetWidth;
-        const y1 = fromNode.y + fromEl.offsetHeight / 2;
-        // 输入端口：节点左侧中部
-        const x2 = toNode.x;
-        const y2 = toNode.y + toEl.offsetHeight / 2;
-
-        const dx = Math.max(50, Math.abs(x2 - x1) * 0.4);
-        const path = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-
-        const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        pathEl.setAttribute('d', path);
-        pathEl.setAttribute('class', 'conn-path' + (selectedConn === conn.id ? ' selected' : ''));
-        pathEl.dataset.connId = conn.id;
-        pathEl.addEventListener('click', (e) => {
-          e.stopPropagation();
-          selectedConn = conn.id;
-          renderConnections();
-        });
-        svg.appendChild(pathEl);
+        const fn = canvasData.nodes.find(n=>n.id===conn.from);
+        const tn = canvasData.nodes.find(n=>n.id===conn.to);
+        if (!fn || !tn) continue;
+        const fe = nodeElements[conn.from], te = nodeElements[conn.to];
+        if (!fe || !te) continue;
+        const x1 = fn.x + fe.offsetWidth, y1 = fn.y + fe.offsetHeight/2;
+        const x2 = tn.x, y2 = tn.y + te.offsetHeight/2;
+        const dx = Math.max(40, Math.abs(x2-x1)*0.35);
+        const p = `M ${x1} ${y1} C ${x1+dx} ${y1}, ${x2-dx} ${y2}, ${x2} ${y2}`;
+        const el = document.createElementNS('http://www.w3.org/2000/svg','path');
+        el.setAttribute('d', p);
+        let cls = 'conn-path';
+        if (selectedConn === conn.id) cls += ' selected';
+        // 运行中的连线动画
+        if (currentCanvasId) {
+          const rec = pollTimers[conn.from];
+          if (rec) cls += ' running';
+        }
+        el.setAttribute('class', cls);
+        el.dataset.connId = conn.id;
+        el.addEventListener('click', (e) => { e.stopPropagation(); selectedConn = conn.id; renderConnections(); });
+        svg.appendChild(el);
       }
     }
 
-    function updateConnectionPath(fromId) {
-      // 拖拽节点时只更新关联连线（性能优化）
-      const affected = canvasData.connections.filter(c => c.from === fromId || c.to === fromId);
-      if (affected.length === 0) return;
-      renderConnections();
-    }
-
     // ═══════════════════════════════════════════════════════════════
-    // 节点拖拽
+    // 节点交互
     // ═══════════════════════════════════════════════════════════════
     function bindNodeEvents(el, node) {
       const header = el.querySelector('.node-header');
-
       header.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
         e.stopPropagation();
         selectedNode = node.id;
         document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
         el.classList.add('selected', 'dragging');
-
-        const startX = e.clientX, startY = e.clientY;
-        const origX = node.x, origY = node.y;
-
-        function onMove(ev) {
-          const dx = (ev.clientX - startX) / viewScale;
-          const dy = (ev.clientY - startY) / viewScale;
-          node.x = origX + dx;
-          node.y = origY + dy;
-          el.style.left = node.x + 'px';
-          el.style.top = node.y + 'px';
-          updateConnectionPath(node.id);
+        const sx = e.clientX, sy = e.clientY, ox = node.x, oy = node.y;
+        function mv(ev) {
+          node.x = ox + (ev.clientX-sx)/viewScale;
+          node.y = oy + (ev.clientY-sy)/viewScale;
+          el.style.left = node.x+'px'; el.style.top = node.y+'px';
+          const aff = canvasData.connections.filter(c=>c.from===node.id||c.to===node.id);
+          if (aff.length) renderConnections();
         }
-        function onUp() {
+        function up() {
           el.classList.remove('dragging');
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
+          document.removeEventListener('mousemove', mv);
+          document.removeEventListener('mouseup', up);
+          autoSave();
         }
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
+        document.addEventListener('mousemove', mv);
+        document.addEventListener('mouseup', up);
       });
-
-      // 端口连线
       const outPort = el.querySelector('.port-out');
       if (outPort) {
         outPort.addEventListener('mousedown', (e) => {
-          e.stopPropagation();
-          e.preventDefault();
-          isConnecting = true;
-          connStart = node.id;
-          connStartPort = outPort;
+          e.stopPropagation(); e.preventDefault();
+          isConnecting = true; connStart = node.id;
         });
       }
-
-      // 点击节点选中
       el.addEventListener('mousedown', (e) => {
         if (e.target.classList.contains('port') || e.target.closest('.node-header')) return;
         selectedNode = node.id;
@@ -631,170 +548,121 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 画布交互：缩放、平移、右键菜单
+    // 画布交互
     // ═══════════════════════════════════════════════════════════════
     const viewport = document.getElementById('viewport');
-
-    // 滚轮缩放（以鼠标位置为中心）
     viewport.addEventListener('wheel', (e) => {
       e.preventDefault();
-      const vp = viewport.getBoundingClientRect();
-      const mx = e.clientX - vp.left;
-      const my = e.clientY - vp.top;
-      // 鼠标在画布坐标系中的位置
-      const wx = (mx - viewX) / viewScale;
-      const wy = (my - viewY) / viewScale;
-      const factor = e.deltaY < 0 ? 1.1 : 0.9;
-      viewScale = Math.max(0.2, Math.min(3, viewScale * factor));
-      // 保持鼠标位置不变
-      viewX = mx - wx * viewScale;
-      viewY = my - wy * viewScale;
+      const r = viewport.getBoundingClientRect();
+      const mx = e.clientX-r.left, my = e.clientY-r.top;
+      const wx = (mx-viewX)/viewScale, wy = (my-viewY)/viewScale;
+      const f = e.deltaY < 0 ? 1.1 : 0.9;
+      viewScale = Math.max(0.2, Math.min(3, viewScale*f));
+      viewX = mx-wx*viewScale; viewY = my-wy*viewScale;
       applyTransform();
     }, { passive: false });
 
-    // 中键 / 空格+左键平移
     let spaceDown = false;
     document.addEventListener('keydown', (e) => {
-      if (e.code === 'Space' && !spaceDown) { spaceDown = true; viewport.style.cursor = 'grab'; }
+      if (e.code === 'Space' && !spaceDown && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+        spaceDown = true; viewport.style.cursor = 'grab';
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (selectedConn) {
+          canvasData.connections = canvasData.connections.filter(c=>c.id!==selectedConn);
+          selectedConn = null; renderConnections(); updateStatusbar(); autoSave();
+        } else if (selectedNode) { removeNode(selectedNode); }
+      }
     });
     document.addEventListener('keyup', (e) => {
       if (e.code === 'Space') { spaceDown = false; viewport.style.cursor = 'default'; }
     });
 
     viewport.addEventListener('mousedown', (e) => {
-      const isMiddle = e.button === 1;
-      const isSpacePan = e.button === 0 && spaceDown;
-      if (!isMiddle && !isSpacePan) {
-        // 处理连线释放
+      const mid = e.button === 1, sp = e.button === 0 && spaceDown;
+      if (!mid && !sp) {
         if (isConnecting) {
-          // 检查是否释放在某个输入端口上
-          const target = document.elementFromPoint(e.clientX, e.clientY);
-          if (target && target.classList.contains('port-in')) {
-            const targetNode = target.closest('.node');
-            if (targetNode && targetNode.dataset.id !== connStart) {
-              const toId = targetNode.dataset.id;
-              // 避免重复连线
-              const exists = canvasData.connections.some(c => c.from === connStart && c.to === toId);
-              if (!exists) {
-                canvasData.connections.push({ id: uid(), from: connStart, to: toId });
-                renderConnections();
-                updateStatusbar();
+          const t = document.elementFromPoint(e.clientX, e.clientY);
+          if (t && t.classList.contains('port-in')) {
+            const tn = t.closest('.node');
+            if (tn && tn.dataset.id !== connStart) {
+              const id = tn.dataset.id;
+              if (!canvasData.connections.some(c=>c.from===connStart&&c.to===id)) {
+                canvasData.connections.push({ id: uid(), from: connStart, to: id });
+                renderConnections(); updateStatusbar(); autoSave();
               }
             }
           }
-          isConnecting = false;
-          connStart = null;
+          isConnecting = false; connStart = null;
           const temp = document.getElementById('svg-layer').querySelector('.conn-temp');
           if (temp) temp.remove();
         }
         return;
       }
       e.preventDefault();
-      isPanning = true;
-      viewport.classList.add('panning');
+      isPanning = true; viewport.classList.add('panning');
       panStart = { x: e.clientX, y: e.clientY, vx: viewX, vy: viewY };
     });
 
     document.addEventListener('mousemove', (e) => {
-      // 平移
       if (isPanning) {
-        viewX = panStart.vx + (e.clientX - panStart.x);
-        viewY = panStart.vy + (e.clientY - panStart.y);
-        applyTransform();
-        return;
+        viewX = panStart.vx + (e.clientX-panStart.x);
+        viewY = panStart.vy + (e.clientY-panStart.y);
+        applyTransform(); return;
       }
-      // 连线拖拽中：更新临时连线
       if (isConnecting && connStart) {
-        const fromNode = canvasData.nodes.find(n => n.id === connStart);
-        const fromEl = nodeElements[connStart];
-        if (!fromNode || !fromEl) return;
-        const x1 = fromNode.x + fromEl.offsetWidth;
-        const y1 = fromNode.y + fromEl.offsetHeight / 2;
-        const vp = viewport.getBoundingClientRect();
-        const c = screenToCanvas(e.clientX - vp.left, e.clientY - vp.top);
-        const dx = Math.max(50, Math.abs(c.x - x1) * 0.4);
-        const path = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${c.x - dx} ${c.y}, ${c.x} ${c.y}`;
-
-        let temp = document.getElementById('svg-layer').querySelector('.conn-temp');
-        if (!temp) {
-          temp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-          temp.setAttribute('class', 'conn-temp');
-          document.getElementById('svg-layer').appendChild(temp);
-        }
-        temp.setAttribute('d', path);
+        const fn = canvasData.nodes.find(n=>n.id===connStart);
+        const fe = nodeElements[connStart];
+        if (!fn || !fe) return;
+        const x1 = fn.x+fe.offsetWidth, y1 = fn.y+fe.offsetHeight/2;
+        const r = viewport.getBoundingClientRect();
+        const c = screenToCanvas(e.clientX-r.left, e.clientY-r.top);
+        const dx = Math.max(40, Math.abs(c.x-x1)*0.35);
+        const p = `M ${x1} ${y1} C ${x1+dx} ${y1}, ${c.x-dx} ${c.y}, ${c.x} ${c.y}`;
+        let t = document.getElementById('svg-layer').querySelector('.conn-temp');
+        if (!t) { t = document.createElementNS('http://www.w3.org/2000/svg','path'); t.setAttribute('class','conn-temp'); document.getElementById('svg-layer').appendChild(t); }
+        t.setAttribute('d', p);
       }
     });
-
     document.addEventListener('mouseup', () => {
-      if (isPanning) {
-        isPanning = false;
-        viewport.classList.remove('panning');
-      }
+      if (isPanning) { isPanning = false; viewport.classList.remove('panning'); }
     });
 
-    // 右键菜单
-    let ctxPos = { x: 0, y: 0 };
+    let ctxPos = { x:0, y:0 };
     viewport.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      ctxPos = screenToCanvas(e.clientX - viewport.getBoundingClientRect().left,
-                               e.clientY - viewport.getBoundingClientRect().top);
-      const menu = document.getElementById('context-menu');
-      menu.style.display = 'block';
-      menu.style.left = e.clientX + 'px';
-      menu.style.top = e.clientY + 'px';
+      const r = viewport.getBoundingClientRect();
+      ctxPos = screenToCanvas(e.clientX-r.left, e.clientY-r.top);
+      const m = document.getElementById('context-menu');
+      m.style.display = 'block'; m.style.left = e.clientX+'px'; m.style.top = e.clientY+'px';
     });
-
     document.addEventListener('click', (e) => {
       if (!e.target.closest('#context-menu')) hideContextMenu();
       if (!e.target.closest('.node') && !e.target.closest('.conn-path')) {
-        selectedNode = null;
-        selectedConn = null;
-        document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
+        selectedNode = null; selectedConn = null;
+        document.querySelectorAll('.node.selected').forEach(n=>n.classList.remove('selected'));
         renderConnections();
       }
     });
-
-    function hideContextMenu() {
-      document.getElementById('context-menu').style.display = 'none';
-    }
-
-    // 删除选中的连线（按 Delete 键）
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedConn) {
-          canvasData.connections = canvasData.connections.filter(c => c.id !== selectedConn);
-          selectedConn = null;
-          renderConnections();
-          updateStatusbar();
-        } else if (selectedNode) {
-          removeNode(selectedNode);
-        }
-      }
-    });
+    function hideContextMenu() { document.getElementById('context-menu').style.display = 'none'; }
 
     // ═══════════════════════════════════════════════════════════════
-    // 运行画布：POST /api/canvas/run → 轮询所有节点状态
+    // 运行画布
     // ═══════════════════════════════════════════════════════════════
     async function runCanvas() {
       if (canvasData.nodes.length === 0) { alert('画布为空，请先添加节点'); return; }
-      // 停止旧轮询
       Object.keys(pollTimers).forEach(stopPolling);
-
-      const resp = await fetch('/api/canvas/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const r = await fetch('/api/canvas/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          nodes: canvasData.nodes.map(n => ({ id: n.id, type: n.type, x: n.x, y: n.y, data: n.data })),
-          connections: canvasData.connections.map(c => ({ id: c.id, from: c.from, to: c.to }))
+          nodes: canvasData.nodes.map(n => ({ id:n.id, type:n.type, x:n.x, y:n.y, data:n.data })),
+          connections: canvasData.connections.map(c => ({ id:c.id, from:c.from, to:c.to }))
         })
       });
-      const data = await resp.json();
-      currentCanvasId = data.canvas_id;
-
-      // 对所有节点轮询（下游 task_id 运行时才创建）
-      for (const n of canvasData.nodes) {
-        startPolling(n.id);
-      }
+      const d = await r.json();
+      currentCanvasId = d.canvas_id;
+      for (const n of canvasData.nodes) startPolling(n.id);
       updateStatusbar('running');
     }
 
@@ -803,63 +671,91 @@
       pollTimers[nodeId] = setInterval(async () => {
         if (!currentCanvasId) return;
         try {
-          const resp = await fetch(`/api/canvas/${currentCanvasId}/nodes/${nodeId}`);
-          if (!resp.ok) return;
-          const data = await resp.json();
-          updateNodeUI(nodeId, data);
-          // 终态停止轮询
-          if (['success', 'failed', 'blocked'].includes(data.status)) {
-            stopPolling(nodeId);
-            checkAllDone();
-          }
-        } catch (e) { /* 忽略网络错误 */ }
+          const r = await fetch(`/api/canvas/${currentCanvasId}/nodes/${nodeId}`);
+          if (!r.ok) return;
+          const d = await r.json();
+          updateNodeUI(nodeId, d);
+          if (['success','failed','blocked'].includes(d.status)) { stopPolling(nodeId); checkAllDone(); }
+        } catch(e) {}
       }, 800);
     }
-
-    function stopPolling(nodeId) {
-      if (pollTimers[nodeId]) {
-        clearInterval(pollTimers[nodeId]);
-        delete pollTimers[nodeId];
+    function stopPolling(nodeId) { if (pollTimers[nodeId]) { clearInterval(pollTimers[nodeId]); delete pollTimers[nodeId]; renderConnections(); } }
+    function updateNodeUI(nodeId, d) {
+      const badge = document.getElementById('badge-'+nodeId);
+      if (badge) { badge.textContent = STATUS_LABELS[d.status]||d.status; badge.className = 'node-badge '+d.status; }
+      const prog = document.getElementById('prog-'+nodeId);
+      if (prog) { prog.style.width = d.progress+'%'; prog.className = 'fill '+d.status; }
+      if (d.image_url) {
+        const node = canvasData.nodes.find(n=>n.id===nodeId);
+        if (node && node.data.image_url !== d.image_url) { node.data.image_url = d.image_url; refreshNodePreview(nodeId); }
       }
+      if (d.error) { const node = canvasData.nodes.find(n=>n.id===nodeId); if(node) { node.data._error = d.error; refreshNodePreview(nodeId); } }
     }
-
-    function updateNodeUI(nodeId, data) {
-      // 更新 badge
-      const badge = document.getElementById('badge-' + nodeId);
-      if (badge) {
-        badge.textContent = STATUS_LABELS[data.status] || data.status;
-        badge.className = 'node-badge ' + data.status;
-      }
-      // 更新进度条
-      const prog = document.getElementById('prog-' + nodeId);
-      if (prog) {
-        prog.style.width = data.progress + '%';
-        prog.className = 'fill ' + data.status;
-      }
-      // 更新预览图
-      if (data.image_url) {
-        const node = canvasData.nodes.find(n => n.id === nodeId);
-        if (node && node.data.image_url !== data.image_url) {
-          node.data.image_url = data.image_url;
-          refreshNodePreview(nodeId);
-        }
-      }
-      // 更新错误
-      if (data.error) {
-        const node = canvasData.nodes.find(n => n.id === nodeId);
-        if (node) {
-          node.data._error = data.error;
-          refreshNodePreview(nodeId);
-        }
-      }
-    }
-
     function checkAllDone() {
-      const active = Object.keys(pollTimers).length;
-      if (active === 0) {
-        updateStatusbar('done');
-      }
+      if (Object.keys(pollTimers).length === 0) updateStatusbar('done');
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 画布持久化
+    // ═══════════════════════════════════════════════════════════════
+    let autoSaveTimer = null;
+    function autoSave() {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = setTimeout(() => {
+        localStorage.setItem('autosave', JSON.stringify(canvasData));
+      }, 2000);
+    }
+
+    async function saveCanvas() {
+      const name = prompt('画布名称：', '我的画布');
+      if (!name) return;
+      const r = await fetch('/api/canvas/save', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          nodes: canvasData.nodes.map(n => ({ id:n.id, type:n.type, x:n.x, y:n.y, data:n.data })),
+          connections: canvasData.connections.map(c => ({ id:c.id, from:c.from, to:c.to }))
+        })
+      });
+      const d = await r.json();
+      alert(`已保存：${d.name}（${d.id}）`);
+    }
+
+    async function loadCanvasList() {
+      const r = await fetch('/api/canvas/list');
+      const d = await r.json();
+      const body = document.getElementById('canvas-list-body');
+      if (d.canvases.length === 0) { body.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:20px">暂无已保存画布</div>'; }
+      else {
+        body.innerHTML = d.canvases.map(c => {
+          const dt = new Date(c.saved_at * 1000).toLocaleString('zh-CN');
+          return `<div class="canvas-item" onclick="loadCanvas('${c.id}')">
+            <span style="font-size:14px">📋</span>
+            <div class="ci-name">${c.name}</div>
+            <div class="ci-meta">${c.node_count} 节点 · ${dt}</div>
+          </div>`;
+        }).join('');
+      }
+      document.getElementById('canvas-modal').style.display = 'flex';
+    }
+
+    async function loadCanvas(id) {
+      const r = await fetch(`/api/canvas/${id}`);
+      const d = await r.json();
+      // 清空当前画布
+      canvasData.nodes.forEach(n => stopPolling(n.id));
+      Object.values(nodeElements).forEach(el => el.remove());
+      Object.keys(nodeElements).forEach(k => delete nodeElements[k]);
+      // 加载新画布
+      canvasData = { nodes: d.nodes || [], connections: d.connections || [] };
+      canvasData.nodes.forEach(renderNode);
+      renderConnections();
+      updateStatusbar();
+      closeModal();
+      autoSave();
+    }
+
+    function closeModal() { document.getElementById('canvas-modal').style.display = 'none'; }
 
     // ═══════════════════════════════════════════════════════════════
     // 状态栏
@@ -867,17 +763,11 @@
     function updateStatusbar(state) {
       document.getElementById('sb-nodes').textContent = canvasData.nodes.length;
       document.getElementById('sb-conns').textContent = canvasData.connections.length;
-      const dot = document.getElementById('sb-dot');
-      const status = document.getElementById('sb-status');
+      const dot = document.getElementById('sb-dot'), st = document.getElementById('sb-status');
       dot.className = 'sb-dot';
-      if (state === 'running') {
-        dot.classList.add('running');
-        status.textContent = '运行中...';
-      } else if (state === 'done') {
-        status.textContent = '全部完成';
-      } else {
-        status.textContent = '就绪';
-      }
+      if (state === 'running') { dot.classList.add('running'); st.textContent = '运行中...'; }
+      else if (state === 'done') { st.textContent = '全部完成'; }
+      else { st.textContent = '就绪'; }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -886,22 +776,35 @@
     applyTransform();
     updateStatusbar();
 
-    // 默认放一个示例节点引导用户
-    addNodeAt('image_input', 300, 250);
-    addNodeAt('gpt_image', 620, 250);
-    // 自动连线
-    if (canvasData.nodes.length >= 2) {
-      canvasData.connections.push({
-        id: uid(),
-        from: canvasData.nodes[0].id,
-        to: canvasData.nodes[1].id
-      });
-      renderConnections();
-      updateStatusbar();
+    // 从 localStorage 恢复自动保存的画布
+    const saved = localStorage.getItem('autosave');
+    if (saved) {
+      try {
+        const d = JSON.parse(saved);
+        if (d.nodes && d.nodes.length > 0) {
+          canvasData = d;
+          canvasData.nodes.forEach(renderNode);
+          renderConnections();
+          updateStatusbar();
+        }
+      } catch(e) {}
     }
 
-    // 窗口大小变化时重绘连线
+    // 如果没有自动保存，放示例节点引导用户
+    if (canvasData.nodes.length === 0) {
+      addNodeAt('image_input', 300, 250);
+      addNodeAt('gpt_image', 620, 250);
+      if (canvasData.nodes.length >= 2) {
+        canvasData.connections.push({ id: uid(), from: canvasData.nodes[0].id, to: canvasData.nodes[1].id });
+        renderConnections();
+        updateStatusbar();
+      }
+    }
+
     window.addEventListener('resize', () => renderConnections());
+    window.addEventListener('beforeunload', () => {
+      localStorage.setItem('autosave', JSON.stringify(canvasData));
+    });
   </script>
 </body>
 </html>
