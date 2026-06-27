@@ -39,6 +39,7 @@
   - 立即返回 task_id
 - [ ] `_run(task_id, stage, params)`：`async with SEM:` → `update(status="running")` → 按 stage 分发到 `execute_*` → 成功设 success / 异常设 failed(error)
 - [ ] `execute_mock(task_id)`：`for p in range(0,101,10)`：`update(progress=p)` + `await asyncio.sleep(0.5)`；结束设 `status="success"`
+- [ ] **mock 完成后落占位资产**：`storage.save(_placeholder_png(), "png")` 写一个真实可访问的 1x1 PNG 到 `assets.character_png`，让前端拿到的 URL 真实可打开（支撑验收点 5）
 - [ ] registry 全局单例 `registry = TaskRegistry()`
 
 ## T3 — main.py：FastAPI 路由

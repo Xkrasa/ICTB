@@ -41,10 +41,21 @@ class LocalAdapter:
         return f"{self.base_url}/{year}/{month}/{filename}"
 
     async def download(self, url: str) -> bytes:
+        # 本地资源（/assets/...）直接读盘，不走 HTTP
+        if url.startswith(self.base_url):
+            rel = url[len(self.base_url):].lstrip("/")
+            local_path = os.path.join(self.root, rel.replace("/", os.sep))
+            return await asyncio.to_thread(self._read, local_path)
+        # 远程 URL（如 seedance 视频链接 24h 过期前下载）
         async with httpx.AsyncClient() as client:
             resp = await client.get(url)
             resp.raise_for_status()
             return resp.content
+
+    @staticmethod
+    def _read(local_path: str) -> bytes:
+        with open(local_path, "rb") as f:
+            return f.read()
 
     @staticmethod
     def _write(abs_dir: str, file_path: str, data: bytes) -> None:

@@ -12,13 +12,21 @@ from storage import storage
 # StaticFiles 挂载要求目录已存在
 os.makedirs("assets", exist_ok=True)
 
-app = FastAPI(title="AI 团播资产画布 — Phase 0")
+app = FastAPI(title="AI 团播资产画布 — Phase 1")
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 
 # ---- Pydantic 入参/出参模型 ----
 class MockRunRequest(BaseModel):
     workflow_id: str
+
+
+class CharacterRunRequest(BaseModel):
+    workflow_id: str
+    reference_image_url: str
+    hair: str
+    makeup: str
+    clothing: str
 
 
 class AssetUploadResponse(BaseModel):
@@ -49,6 +57,21 @@ async def index():
 @app.post("/api/stages/mock/run")
 async def mock_run(req: MockRunRequest):
     task_id = orchestrator.create_task(req.workflow_id, "mock", {})
+    return {"task_id": task_id}
+
+
+@app.post("/api/stages/character/run")
+async def character_run(req: CharacterRunRequest):
+    task_id = orchestrator.create_task(
+        req.workflow_id,
+        "character",
+        {
+            "reference_image_url": req.reference_image_url,
+            "hair": req.hair,
+            "makeup": req.makeup,
+            "clothing": req.clothing,
+        },
+    )
     return {"task_id": task_id}
 
 

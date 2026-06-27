@@ -11,6 +11,7 @@ import time
 import uuid
 import zlib
 
+from clients import gpt_image
 from storage import storage
 
 # 并发闸：最多 3 个任务同时执行（防止 API 账单失控，后续按配额调整）
@@ -126,3 +127,32 @@ def _placeholder_png() -> bytes:
 
 
 _STAGE_EXECUTORS["mock"] = execute_mock
+
+
+async def execute_character(task_id: str, params: dict) -> None:
+    """阶段一：主播形象加工。参考图 + 发型/妆容/服装 → 背透 PNG。"""
+    registry.update(task_id, progress=5)
+    # 拉参考图（本地 /assets/ URL 直读盘，远程 URL 走 HTTP）
+    ref_bytes = await storage.download(params["reference_image_url"])
+    registry.update(task_id, progress=15)
+    # 调 gpt-image-2（耗时大头 15-200s，期间 progress 停滞属正常）
+    registry.update(task_id, progress=25)
+    png_bytes = await gpt_image.generate_character(
+        ref_bytes,
+        params["hair"],
+        params["makeup"],
+        params["clothing"],
+    )
+    # 落盘
+    url = await storage.save(png_bytes, "png")
+    registry.update(task_id, progress=90)
+    # 更新资产
+    rec = registry.get(task_id)
+    if rec is not None:
+        assets = dict(rec["assets"])
+        assets["character_png"] = url
+        registry.update(task_id, assets=assets)
+    registry.update(task_id, progress=100)
+
+
+_STAGE_EXECUTORS["character"] = execute_character

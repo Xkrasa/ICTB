@@ -3,9 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI 团播资产画布 — Phase 0 骨架</title>
+  <title>AI 团播资产画布 — Phase 1</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+  <style>
+    /* 棋盘格背景，用于显示背透 PNG 的透明区域 */
+    .checkerboard {
+      background-image:
+        linear-gradient(45deg, #ddd 25%, transparent 25%),
+        linear-gradient(-45deg, #ddd 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #ddd 75%),
+        linear-gradient(-45deg, transparent 75%, #ddd 75%);
+      background-size: 16px 16px;
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+    }
+  </style>
 </head>
 <body class="bg-gray-100">
   <div class="flex h-screen">
@@ -41,7 +53,19 @@
     }
 
     function addWorkflow() {
-      workflows.push({ id: uid(), mock_tid: null, status: 'idle', progress: 0, assets: null });
+      workflows.push({
+        id: uid(),
+        // 阶段一·形象加工输入
+        reference_image_url: null,
+        hair: '', makeup: '', clothing: '',
+        // 任务状态（mock/character 共用，同一卡片同一时间只跑一个阶段）
+        stage: null,
+        tid: null,
+        status: 'idle',
+        progress: 0,
+        assets: null,
+        error: null
+      });
       render();
     }
 
@@ -51,12 +75,74 @@
       render();
     }
 
-    async function runMock(id) {
+    function updateField(id, field, value) {
+      const wf = workflows.find(w => w.id === id);
+      if (wf) wf[field] = value;
+    }
+
+    // 每张卡片独立上传主播原图（阶段一参考图）
+    async function uploadReference(id, input) {
       const wf = workflows.find(w => w.id === id);
       if (!wf) return;
+      const file = input.files[0];
+      if (!file) return;
+      const fd = new FormData();
+      fd.append('file', file);
+      wf.reference_image_url = null;
+      render();
+      try {
+        const resp = await fetch('/api/assets/upload', { method: 'POST', body: fd });
+        const data = await resp.json();
+        wf.reference_image_url = data.url;
+        render();
+      } catch (e) {
+        alert('上传失败: ' + e.message);
+      }
+    }
+
+    async function runCharacter(id) {
+      const wf = workflows.find(w => w.id === id);
+      if (!wf) return;
+      if (!wf.reference_image_url) { alert('请先上传主播原图'); return; }
+      if (!wf.hair || !wf.makeup || !wf.clothing) { alert('请填写发型/妆容/服装'); return; }
+      wf.stage = 'character';
       wf.status = 'pending';
       wf.progress = 0;
       wf.assets = null;
+      wf.error = null;
+      wf.tid = null;
+      render();
+      try {
+        const resp = await fetch('/api/stages/character/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workflow_id: id,
+            reference_image_url: wf.reference_image_url,
+            hair: wf.hair,
+            makeup: wf.makeup,
+            clothing: wf.clothing
+          })
+        });
+        const data = await resp.json();
+        wf.tid = data.task_id;
+        pollTask(id, data.task_id);
+      } catch (e) {
+        wf.status = 'failed';
+        wf.error = e.message;
+        render();
+      }
+    }
+
+    async function runMock(id) {
+      const wf = workflows.find(w => w.id === id);
+      if (!wf) return;
+      wf.stage = 'mock';
+      wf.status = 'pending';
+      wf.progress = 0;
+      wf.assets = null;
+      wf.error = null;
+      wf.tid = null;
       render();
       try {
         const resp = await fetch('/api/stages/mock/run', {
@@ -65,10 +151,11 @@
           body: JSON.stringify({ workflow_id: id })
         });
         const data = await resp.json();
-        wf.mock_tid = data.task_id;
+        wf.tid = data.task_id;
         pollTask(id, data.task_id);
       } catch (e) {
         wf.status = 'failed';
+        wf.error = e.message;
         render();
       }
     }
@@ -85,6 +172,7 @@
           wf.status = data.status;
           wf.progress = data.progress;
           wf.assets = data.assets;
+          wf.error = data.error;
           render();
           if (data.status === 'success' || data.status === 'failed') {
             clearInterval(timers[id]);
@@ -125,6 +213,11 @@
       return s === 'running' || s === 'pending';
     }
 
+    // 进度条颜色按阶段区分：character 主题绿，mock 蓝
+    function barClasses(stage) {
+      return stage === 'character' ? 'bg-emerald-500' : 'bg-blue-500';
+    }
+
     function render() {
       const track = document.getElementById('track');
       if (workflows.length === 0) {
@@ -135,21 +228,45 @@
         <div class="bg-white rounded shadow p-3">
           <div class="flex items-center justify-between mb-2">
             <span class="font-semibold">卡片 ${wf.id}</span>
-            <div class="space-x-2">
-              <button onclick="runMock('${wf.id}')" ${isBusy(wf.status) ? 'disabled' : ''}
-                class="px-2 py-1 rounded text-white ${isBusy(wf.status) ? 'bg-gray-400' : 'bg-green-600 hover:bg-green-700'}">运行 mock</button>
-              <button onclick="removeWorkflow('${wf.id}')" class="px-2 py-1 rounded bg-red-500 text-white hover:bg-red-600">删除</button>
-            </div>
+            <button onclick="removeWorkflow('${wf.id}')" class="px-2 py-1 rounded bg-red-500 text-white hover:bg-red-600">删除</button>
           </div>
+
+          <!-- 阶段一·形象加工输入 -->
+          <div class="border rounded p-2 mb-2 bg-gray-50">
+            <div class="text-xs font-semibold text-gray-600 mb-1">阶段一 · 形象加工</div>
+            <div class="mb-1 flex items-center">
+              <input type="file" accept="image/*" onchange="uploadReference('${wf.id}', this)" class="text-xs" ${isBusy(wf.status) ? 'disabled' : ''} />
+              <span class="text-xs ml-2 ${wf.reference_image_url ? 'text-green-600' : 'text-gray-400'}">${wf.reference_image_url ? '已上传' : '未上传'}</span>
+            </div>
+            <div class="grid grid-cols-3 gap-1 mb-1">
+              <input type="text" placeholder="发型" value="${wf.hair}" oninput="updateField('${wf.id}','hair',this.value)" class="text-xs border rounded px-1 py-0.5" ${isBusy(wf.status) ? 'disabled' : ''} />
+              <input type="text" placeholder="妆容" value="${wf.makeup}" oninput="updateField('${wf.id}','makeup',this.value)" class="text-xs border rounded px-1 py-0.5" ${isBusy(wf.status) ? 'disabled' : ''} />
+              <input type="text" placeholder="服装" value="${wf.clothing}" oninput="updateField('${wf.id}','clothing',this.value)" class="text-xs border rounded px-1 py-0.5" ${isBusy(wf.status) ? 'disabled' : ''} />
+            </div>
+            <button onclick="runCharacter('${wf.id}')" ${isBusy(wf.status) ? 'disabled' : ''}
+              class="px-2 py-1 rounded text-white text-xs ${isBusy(wf.status) ? 'bg-gray-400' : 'bg-emerald-600 hover:bg-emerald-700'}">运行形象加工</button>
+          </div>
+
+          <!-- mock 回归测试 -->
+          <div class="mb-2">
+            <button onclick="runMock('${wf.id}')" ${isBusy(wf.status) ? 'disabled' : ''}
+              class="px-2 py-1 rounded text-white text-xs ${isBusy(wf.status) ? 'bg-gray-400' : 'bg-gray-500 hover:bg-gray-600'}">运行 mock（回归）</button>
+          </div>
+
+          <!-- 状态 + 进度 -->
           <div class="text-sm mb-1">状态：
             <span class="px-2 rounded ${badgeClasses(wf.status)}">${wf.status}</span>
+            ${wf.stage ? `<span class="text-xs text-gray-500 ml-1">${wf.stage}</span>` : ''}
           </div>
           <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
-            <div class="bg-blue-500 h-3 transition-all" style="width:${wf.progress}%"></div>
+            <div class="${barClasses(wf.stage)} h-3 transition-all" style="width:${wf.progress}%"></div>
           </div>
           <div class="text-xs text-gray-500 mt-1">进度 ${wf.progress}%</div>
+
+          ${wf.error ? `<div class="text-xs text-red-600 mt-1 break-all">错误：${wf.error}</div>` : ''}
+
           ${wf.assets && wf.assets.character_png
-            ? `<div class="mt-2 text-xs"><a href="${wf.assets.character_png}" target="_blank" class="text-blue-600 underline">查看产出的占位资产</a></div>`
+            ? `<div class="mt-2"><div class="text-xs text-gray-600 mb-1">产出背透 PNG（点击放大）：</div><a href="${wf.assets.character_png}" target="_blank"><img src="${wf.assets.character_png}" class="max-h-40 border rounded checkerboard" /></a></div>`
             : ''}
         </div>
       `).join('');
