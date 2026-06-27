@@ -35,7 +35,8 @@
       transition: all 0.12s; white-space: nowrap;
     }
     .tb-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
-    .tb-btn .icon { font-size: 14px; }
+    .tb-btn .icon { width: 14px; height: 14px; margin-right: 4px; display: inline-flex; align-items: center; justify-content: center; }
+    .tb-btn .icon svg { width: 100%; height: 100%; }
     .tb-btn.add-btn:hover { background: rgba(255,255,255,0.06); }
     .tb-btn.add-btn[data-type="image_input"]:hover { color: var(--c-image_input); }
     .tb-btn.add-btn[data-type="gpt_image"]:hover { color: var(--c-gpt_image); }
@@ -106,10 +107,12 @@
     }
     .node-header:active { cursor: grabbing; }
     .node-header .node-icon {
-      font-size: 14px; width: 22px; height: 22px; border-radius: 5px;
+      width: 22px; height: 22px; border-radius: 5px;
       display: flex; align-items: center; justify-content: center;
       background: color-mix(in srgb, var(--node-color) 18%, transparent);
+      color: var(--node-color);
     }
+    .node-header .node-icon svg { width: 13px; height: 13px; }
     .node-header .node-title { flex: 1; color: #ddd; }
     .node-header .node-badge {
       font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 500;
@@ -171,6 +174,46 @@
     .node-progress-bar .fill.success { background: #10B981; }
     .node-progress-bar .fill.failed { background: #EF4444; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+    /* ═══════════ 右侧节点/资源抽屉 ═══════════ */
+    #side-panel {
+      position: fixed; top: 0; right: 0; bottom: 0; width: 240px; z-index: 2000;
+      background: rgba(16, 16, 22, 0.98); backdrop-filter: blur(18px);
+      border-left: 1px solid rgba(255,255,255,0.06);
+      transform: translateX(100%); transition: transform 0.25s ease;
+      display: flex; flex-direction: column; padding: 14px 10px;
+    }
+    #side-panel.open { transform: translateX(0); }
+    #side-panel .sp-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 18px; padding: 0 4px;
+    }
+    #side-panel .sp-header span { font-size: 15px; font-weight: 600; color: #fff; }
+    #side-panel .sp-close {
+      width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+      border-radius: 5px; cursor: pointer; color: #888; font-size: 16px;
+    }
+    #side-panel .sp-close:hover { background: rgba(255,255,255,0.08); color: #fff; }
+    #side-panel .sp-section { margin-bottom: 18px; }
+    #side-panel .sp-section-title {
+      font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px;
+      margin-bottom: 8px; padding: 0 4px;
+    }
+    #side-panel .sp-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 10px; border-radius: 8px; cursor: pointer;
+      color: #ccc; font-size: 13px; margin-bottom: 2px;
+      transition: background 0.12s;
+    }
+    #side-panel .sp-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
+    #side-panel .sp-item svg { width: 16px; height: 16px; color: #888; }
+    #side-panel .sp-item:hover svg { color: #fff; }
+    #side-panel .sp-item .arrow { margin-left: auto; font-size: 11px; color: #555; }
+    #side-panel-overlay {
+      position: fixed; inset: 0; z-index: 1999; background: rgba(0,0,0,0.4);
+      display: none;
+    }
+    #side-panel-overlay.show { display: block; }
 
     /* ═══════════ 生成类节点专用样式（生图/生视频）═══════════ */
     .gen-prompt-box {
@@ -255,7 +298,8 @@
       transition: background 0.1s;
     }
     #context-menu .menu-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
-    #context-menu .menu-item .mi-icon { font-size: 14px; width: 18px; text-align: center; }
+    #context-menu .menu-item .mi-icon { width: 16px; height: 14px; display: inline-flex; align-items: center; justify-content: center; margin-right: 4px; }
+    #context-menu .menu-item .mi-icon svg { width: 100%; height: 100%; }
 
     /* ═══════════ 画布列表弹窗 ═══════════ */
     #canvas-modal {
@@ -336,18 +380,47 @@
 </head>
 <body>
 
+  <!-- 隐藏 SVG 图标集 -->
+  <svg style="display:none" aria-hidden="true">
+    <symbol id="icon-image" viewBox="0 0 16 16">
+      <rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <circle cx="6" cy="7" r="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M3 13l4-4 3 3 4-4" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    </symbol>
+    <symbol id="icon-spark" viewBox="0 0 16 16">
+      <path d="M8 1v3M8 12v3M1 8h3M12 8h3M3.5 3.5l2 2M10.5 10.5l2 2M3.5 12.5l2-2M10.5 5.5l2-2" stroke="currentColor" stroke-width="1.4"/>
+    </symbol>
+    <symbol id="icon-scissors" viewBox="0 0 16 16">
+      <circle cx="4" cy="4" r="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <circle cx="4" cy="12" r="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M14 2L6.5 9.5" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M14 14L6.5 6.5" stroke="currentColor" stroke-width="1.4"/>
+    </symbol>
+    <symbol id="icon-brush" viewBox="0 0 16 16">
+      <path d="M2 14l1.5-4.5L9.5 3.5l3 3L6.5 12.5 2 14z" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M9.5 3.5l1.5-1.5 3 3-1.5 1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    </symbol>
+    <symbol id="icon-video" viewBox="0 0 16 16">
+      <rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <polygon points="6,6 11,8 6,10" fill="currentColor"/>
+    </symbol>
+    <symbol id="icon-list" viewBox="0 0 16 16">
+      <path d="M3 4h10M3 8h10M3 12h10" stroke="currentColor" stroke-width="1.4"/>
+    </symbol>
+  </svg>
+
   <!-- ═══════════ 工具栏 ═══════════ -->
   <div id="toolbar">
-    <span class="logo">🎬 AI 团播<span>画布</span></span>
+    <span class="logo">AI 团播<span>画布</span></span>
     <div class="tb-divider"></div>
-    <button class="tb-btn add-btn" data-type="image_input" onclick="addNode('image_input')"><span class="icon">🖼️</span>图片输入</button>
-    <button class="tb-btn add-btn" data-type="gpt_image" onclick="addNode('gpt_image')"><span class="icon">✨</span>AI 生图</button>
-    <button class="tb-btn add-btn" data-type="remove_bg" onclick="addNode('remove_bg')"><span class="icon">✂️</span>抠图</button>
-    <button class="tb-btn add-btn" data-type="mask_edit" onclick="addNode('mask_edit')"><span class="icon">🖌️</span>遮罩</button>
-    <button class="tb-btn add-btn" data-type="seedance_video" onclick="addNode('seedance_video')"><span class="icon">🎬</span>视频生成</button>
+    <button class="tb-btn add-btn" data-type="image_input" onclick="addNode('image_input')"><span class="icon"><svg><use href="#icon-image"/></svg></span>图片输入</button>
+    <button class="tb-btn add-btn" data-type="gpt_image" onclick="addNode('gpt_image')"><span class="icon"><svg><use href="#icon-spark"/></svg></span>AI 生图</button>
+    <button class="tb-btn add-btn" data-type="remove_bg" onclick="addNode('remove_bg')"><span class="icon"><svg><use href="#icon-scissors"/></svg></span>抠图</button>
+    <button class="tb-btn add-btn" data-type="mask_edit" onclick="addNode('mask_edit')"><span class="icon"><svg><use href="#icon-brush"/></svg></span>遮罩</button>
+    <button class="tb-btn add-btn" data-type="seedance_video" onclick="addNode('seedance_video')"><span class="icon"><svg><use href="#icon-video"/></svg></span>视频生成</button>
     <div class="tb-divider"></div>
-    <button class="tb-btn" onclick="saveCanvas()"><span class="icon">💾</span>保存</button>
-    <button class="tb-btn" onclick="loadCanvasList()"><span class="icon">📂</span>加载</button>
+    <button class="tb-btn" onclick="saveCanvas()">保存</button>
+    <button class="tb-btn" onclick="loadCanvasList()">加载</button>
     <div class="spacer"></div>
     <span id="zoom-display">100%</span>
     <button class="tb-btn" onclick="zoomBy(1.2)" title="放大">+</button>
@@ -356,7 +429,7 @@
     <div class="tb-divider"></div>
     <button class="tb-btn danger" onclick="clearCanvas()">清空</button>
     <div class="tb-divider"></div>
-    <button class="tb-btn" onclick="cloneChain()"><span class="icon">🔗</span>克隆链路</button>
+    <button class="tb-btn" onclick="cloneChain()">克隆链路</button>
     <button class="tb-btn primary" onclick="runCanvas()">▶ 运行</button>
   </div>
 
@@ -371,11 +444,11 @@
 
   <!-- 右键菜单 -->
   <div id="context-menu">
-    <div class="menu-item" onclick="addNodeAt('image_input', ctxPos.x, ctxPos.y)"><span class="mi-icon">🖼️</span>图片输入</div>
-    <div class="menu-item" onclick="addNodeAt('gpt_image', ctxPos.x, ctxPos.y)"><span class="mi-icon">✨</span>AI 生图</div>
-    <div class="menu-item" onclick="addNodeAt('remove_bg', ctxPos.x, ctxPos.y)"><span class="mi-icon">✂️</span>抠图</div>
-    <div class="menu-item" onclick="addNodeAt('mask_edit', ctxPos.x, ctxPos.y)"><span class="mi-icon">🖌️</span>遮罩编辑</div>
-    <div class="menu-item" onclick="addNodeAt('seedance_video', ctxPos.x, ctxPos.y)"><span class="mi-icon">🎬</span>视频生成</div>
+    <div class="menu-item" onclick="addNodeAt('image_input', ctxPos.x, ctxPos.y)"><span class="mi-icon"><svg><use href="#icon-image"/></svg></span>图片输入</div>
+    <div class="menu-item" onclick="addNodeAt('gpt_image', ctxPos.x, ctxPos.y)"><span class="mi-icon"><svg><use href="#icon-spark"/></svg></span>AI 生图</div>
+    <div class="menu-item" onclick="addNodeAt('remove_bg', ctxPos.x, ctxPos.y)"><span class="mi-icon"><svg><use href="#icon-scissors"/></svg></span>抠图</div>
+    <div class="menu-item" onclick="addNodeAt('mask_edit', ctxPos.x, ctxPos.y)"><span class="mi-icon"><svg><use href="#icon-brush"/></svg></span>遮罩编辑</div>
+    <div class="menu-item" onclick="addNodeAt('seedance_video', ctxPos.x, ctxPos.y)"><span class="mi-icon"><svg><use href="#icon-video"/></svg></span>视频生成</div>
   </div>
 
   <!-- 画布列表弹窗 -->
@@ -416,6 +489,46 @@
     <div class="sb-item" style="color:#444">右键添加节点 · 拖端口连线 · 滚轮缩放 · 中键/空格平移</div>
   </div>
 
+  <div id="side-panel-overlay" onclick="closeSidePanel()"></div>
+  <div id="side-panel">
+    <div class="sp-header"><span>添加节点 / 资源</span><div class="sp-close" onclick="closeSidePanel()">✕</div></div>
+
+    <div class="sp-section">
+      <div class="sp-section-title">添加节点</div>
+      <div class="sp-item" onclick="addNodeFromPanel('image_input')">
+        <svg><use href="#icon-image"/></svg>图片输入
+      </div>
+      <div class="sp-item" onclick="addNodeFromPanel('gpt_image')">
+        <svg><use href="#icon-spark"/></svg>AI 生图
+      </div>
+      <div class="sp-item" onclick="addNodeFromPanel('remove_bg')">
+        <svg><use href="#icon-scissors"/></svg>抠图
+      </div>
+      <div class="sp-item" onclick="addNodeFromPanel('mask_edit')">
+        <svg><use href="#icon-brush"/></svg>遮罩编辑
+      </div>
+      <div class="sp-item" onclick="addNodeFromPanel('seedance_video')">
+        <svg><use href="#icon-video"/></svg>视频生成
+      </div>
+    </div>
+
+    <div class="sp-section">
+      <div class="sp-section-title">添加资源</div>
+      <div class="sp-item" onclick="addNodeFromPanel('image_input')">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1v14M1 8h14"/></svg>上传
+      </div>
+      <div class="sp-item" style="opacity:0.45;cursor:not-allowed;">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="3"/><path d="M2 15c0-4 3-6 6-6s6 2 6 6"/></svg>真人素材
+      </div>
+      <div class="sp-item" style="opacity:0.45;cursor:not-allowed;">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="3"/><path d="M14 15c0-4-2.5-6-6-6s-6 2-6 6"/><path d="M12 5c0-2.5-1.8-4-4-4"/></svg>虚拟素材
+      </div>
+      <div class="sp-item" style="opacity:0.45;cursor:not-allowed;">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="6" cy="6" r="4"/><path d="M10 10l5 5"/></svg>团播素材<span class="arrow">›</span>
+      </div>
+    </div>
+  </div>
+
   <script>
     // ═══════════════════════════════════════════════════════════════
     // 数据模型
@@ -431,11 +544,11 @@
     let isConnecting = false, connStart = null;
 
     const NODE_CFG = {
-      image_input:   { icon: '🖼️', title: '图片输入', color: 'var(--c-image_input)' },
-      gpt_image:     { icon: '✨', title: 'AI 生图',  color: 'var(--c-gpt_image)' },
-      remove_bg:     { icon: '✂️', title: '抠图',     color: 'var(--c-remove_bg)' },
-      mask_edit:     { icon: '🖌️', title: '遮罩编辑', color: 'var(--c-mask_edit)' },
-      seedance_video:{ icon: '🎬', title: '视频生成', color: 'var(--c-seedance)' },
+      image_input:   { icon: 'image', title: '图片输入', color: 'var(--c-image_input)' },
+      gpt_image:     { icon: 'spark', title: 'AI 生图',  color: 'var(--c-gpt_image)' },
+      remove_bg:     { icon: 'scissors', title: '抠图',     color: 'var(--c-remove_bg)' },
+      mask_edit:     { icon: 'brush', title: '遮罩编辑', color: 'var(--c-mask_edit)' },
+      seedance_video:{ icon: 'video', title: '视频生成', color: 'var(--c-seedance)' },
     };
     const STATUS_LABELS = { idle:'待机', pending:'排队', running:'运行中', success:'完成', failed:'失败', blocked:'阻断' };
 
@@ -466,6 +579,18 @@
       const r = document.getElementById('viewport').getBoundingClientRect();
       const c = screenToCanvas(r.width/2, r.height/2);
       addNodeAt(type, c.x, c.y);
+    }
+    function openSidePanel() {
+      document.getElementById('side-panel').classList.add('open');
+      document.getElementById('side-panel-overlay').classList.add('show');
+    }
+    function closeSidePanel() {
+      document.getElementById('side-panel').classList.remove('open');
+      document.getElementById('side-panel-overlay').classList.remove('show');
+    }
+    function addNodeFromPanel(type) {
+      addNode(type);
+      closeSidePanel();
     }
     function addNodeAt(type, x, y) {
       const node = { id: uid(), type, x: x-105, y: y-50, data: getDefaultData(type) };
@@ -566,7 +691,7 @@
     // 节点渲染
     // ═══════════════════════════════════════════════════════════════
     function renderNode(node) {
-      const cfg = NODE_CFG[node.type] || { icon:'📦', title:node.type, color:'#555' };
+      const cfg = NODE_CFG[node.type] || { icon:null, title:node.type, color:'#555' };
       const el = document.createElement('div');
       el.className = 'node' + (node.type === 'gpt_image' || node.type === 'seedance_video' ? ' gen-node' : '');
       el.style.left = node.x + 'px'; el.style.top = node.y + 'px';
@@ -581,10 +706,11 @@
     function buildNodeHTML(node, cfg) {
       const inPort = node.type === 'image_input' ? '' : '<div class="port port-in" data-port="in"></div>';
       const outPort = '<div class="port port-out" data-port="out"></div>';
+      const iconSvg = cfg.icon ? `<svg class="node-icon-svg"><use href="#icon-${cfg.icon}"/></svg>` : '';
       return `${inPort}${outPort}
         <button class="node-delete" onclick="removeNode('${node.id}')">✕</button>
         <div class="node-header" data-id="${node.id}">
-          <span class="node-icon">${cfg.icon}</span>
+          <span class="node-icon">${iconSvg}</span>
           <span class="node-title">${cfg.title}</span>
           <span class="node-badge" id="badge-${node.id}">待机</span>
         </div>
@@ -596,11 +722,10 @@
       if (d.image_url) {
         html += `<div class="node-preview"><div class="checkerboard"></div><img src="${d.image_url}" /></div>`;
       } else {
-        const cfg = NODE_CFG[node.type] || { icon:'📦' };
-        html += `<div class="node-preview"><div class="checkerboard"></div><span class="preview-placeholder">${cfg.icon}</span></div>`;
+        html += `<div class="node-preview"><div class="checkerboard"></div><span class="preview-placeholder"></span></div>`;
       }
       if (node.type === 'image_input') {
-        html += `<label class="upload-btn" for="upload-${node.id}"><span>📤 上传图片</span></label>
+        html += `<label class="upload-btn" for="upload-${node.id}"><span>上传图片</span></label>
           <input id="upload-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadImage('${node.id}',this)" />`;
       } else if (node.type === 'gpt_image') {
         const thumb = d.image_url ? `<img src="${d.image_url}" />` : `<span class="gen-thumb-empty">?</span>`;
@@ -624,8 +749,8 @@
               <option value="1:1" ${d.ratio==='1:1'?'selected':''}>1:1 · 自适应</option>
             </select>
             <div class="spacer"></div>
-            <button class="magic-btn" onclick="polishPrompt('${node.id}')">✨ 润色</button>
-            <div class="cost">💰 ≈0.03元</div>
+            <button class="magic-btn" onclick="polishPrompt('${node.id}')">润色</button>
+            <div class="cost">≈0.03元</div>
           </div>
           <div style="display:flex;gap:5px;margin-top:4px">
             <div style="flex:1"><div class="node-label">发型（可选）</div><input class="node-input" placeholder="微分碎盖" value="${d.hair||''}" oninput="updateNodeData('${node.id}','hair',this.value)" /></div>
@@ -664,7 +789,7 @@
               <option value="15" ${d.duration==='15'?'selected':''}>15秒</option>
             </select>
             <div class="spacer"></div>
-            <div class="cost">💰 ≈0.08元</div>
+            <div class="cost">≈0.08元</div>
           </div>`;
       }
       html += `<div class="node-progress-bar"><div class="fill" id="prog-${node.id}" style="width:0%"></div></div>`;
@@ -993,6 +1118,11 @@
       applyTransform();
     }, { passive: false });
 
+    document.addEventListener('dblclick', (e) => {
+      if (e.target.closest('.node') || e.target.closest('#side-panel') || e.target.closest('#toolbar')) return;
+      openSidePanel();
+    });
+
     let spaceDown = false;
     document.addEventListener('keydown', (e) => {
       if (e.code === 'Space' && !spaceDown && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
@@ -1161,7 +1291,7 @@
         body.innerHTML = d.canvases.map(c => {
           const dt = new Date(c.saved_at * 1000).toLocaleString('zh-CN');
           return `<div class="canvas-item" onclick="loadCanvas('${c.id}')">
-            <span style="font-size:14px">📋</span>
+            <span style="width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:#777"><svg style="width:100%;height:100%"><use href="#icon-list"/></svg></span>
             <div class="ci-name">${c.name}</div>
             <div class="ci-meta">${c.node_count} 节点 · ${dt}</div>
           </div>`;
