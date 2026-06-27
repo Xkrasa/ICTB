@@ -357,7 +357,7 @@ async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> Non
     prompt = params.get("prompt", "")
     if len(prompt) < 5:
         prompt = "基于原图生成10秒动态视频，人物自然微笑，缓慢转头。"
-    duration = params.get("duration", "10")
+    duration = params.get("duration", "8")
     aspect_ratio = params.get("aspect_ratio", "9:16")
 
     # 1. 下载本地图片

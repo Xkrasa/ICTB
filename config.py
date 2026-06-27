@@ -21,6 +21,8 @@ GPT_IMAGE_TIMEOUT = float(os.getenv("GPT_IMAGE_TIMEOUT", "360"))
 RUNNINGHUB_API_KEY = os.getenv("RUNNINGHUB_API_KEY", "")
 RUNNINGHUB_BASE_URL = os.getenv("RUNNINGHUB_BASE_URL", "https://www.runninghub.cn/openapi/v2")
 RUNNINGHUB_TIMEOUT = float(os.getenv("RUNNINGHUB_TIMEOUT", "30"))
+# 渠道选择：official（官方稳定版 4/8/12s）或 low_cost（低价版 10/15s）
+SEEDANCE_CHANNEL = os.getenv("SEEDANCE_CHANNEL", "official")
 # 视频生成轮询间隔（秒）
 SEEDANCE_POLL_INTERVAL = float(os.getenv("SEEDANCE_POLL_INTERVAL", "5"))
 SEEDANCE_POLL_TIMEOUT = float(os.getenv("SEEDANCE_POLL_TIMEOUT", "600"))  # 10 分钟超时

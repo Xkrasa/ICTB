@@ -359,7 +359,7 @@
         case 'image_input': return { image_url: null };
         case 'gpt_image': return { prompt:'', hair:'', makeup:'', clothing:'' };
         case 'remove_bg': return {};
-        case 'seedance_video': return { prompt:'', duration:'10', aspect_ratio:'9:16' };
+        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16' };
         default: return {};
       }
     }
@@ -435,7 +435,10 @@
         html += `<div style="display:flex;gap:5px">
           <div style="flex:1"><div class="node-label">时长</div>
             <select class="node-input" onchange="updateNodeData('${node.id}','duration',this.value)">
-              <option value="10" ${d.duration!=='15'?'selected':''}>10秒</option>
+              <option value="4" ${d.duration==='4'?'selected':''}>4秒</option>
+              <option value="8" ${d.duration==='8'||!d.duration?'selected':''}>8秒</option>
+              <option value="10" ${d.duration==='10'?'selected':''}>10秒</option>
+              <option value="12" ${d.duration==='12'?'selected':''}>12秒</option>
               <option value="15" ${d.duration==='15'?'selected':''}>15秒</option>
             </select></div>
           <div style="flex:1"><div class="node-label">宽高比</div>

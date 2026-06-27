@@ -1,5 +1,9 @@
 """RunningHub API 客户端：seedance 图生视频。
 
+支持两个渠道：
+- official（官方稳定版）：4/8/12s，无 aspectRatio，图片须 720x1280 或 1280x720
+- low_cost（低价版）：10/15s，有 aspectRatio 9:16/16:9
+
 流程：上传图片 → 提交图生视频 → 轮询任务状态 → 返回视频 URL。
 视频 URL 24h 过期，由调用方负责下载转存。
 """
@@ -9,6 +13,20 @@ import httpx
 
 import config
 
+# 渠道配置
+_CHANNELS = {
+    "official": {
+        "endpoint": "/rhart-video-s-official/image-to-video",
+        "durations": ["4", "8", "12"],
+        "has_aspect_ratio": False,
+    },
+    "low_cost": {
+        "endpoint": "/rhart-video-s/image-to-video",
+        "durations": ["10", "15"],
+        "has_aspect_ratio": True,
+    },
+}
+
 
 def _headers() -> dict:
     return {
@@ -17,11 +35,12 @@ def _headers() -> dict:
     }
 
 
-async def upload_image(image_bytes: bytes, filename: str = "image.png") -> str:
-    """上传本地图片到 RunningHub，返回 download_url（1 天有效）。
+def _get_channel() -> dict:
+    return _CHANNELS.get(config.SEEDANCE_CHANNEL, _CHANNELS["official"])
 
-    用于把本地 assets/ 图片转为 RunningHub 可访问的 URL。
-    """
+
+async def upload_image(image_bytes: bytes, filename: str = "image.png") -> str:
+    """上传本地图片到 RunningHub，返回 download_url（1 天有效）。"""
     headers = {"Authorization": f"Bearer {config.RUNNINGHUB_API_KEY}"}
     async with httpx.AsyncClient(timeout=config.RUNNINGHUB_TIMEOUT) as client:
         resp = await client.post(
@@ -39,35 +58,34 @@ async def upload_image(image_bytes: bytes, filename: str = "image.png") -> str:
 async def image_to_video(
     image_url: str,
     prompt: str,
-    duration: str = "10",
+    duration: str = "8",
     aspect_ratio: str = "9:16",
-    storyboard: bool = False,
 ) -> str:
     """提交图生视频任务，返回 task_id。
 
-    Args:
-        image_url: RunningHub 可访问的图片 URL（通过 upload_image 获取）
-        prompt: 视频描述（5-4000 字符）
-        duration: 视频时长，枚举 "10" 或 "15"
-        aspect_ratio: 宽高比，枚举 "9:16" 或 "16:9"
-        storyboard: 是否使用分镜模式
+    根据 config.SEEDANCE_CHANNEL 自动选择端点和参数格式：
+    - official: 不传 aspectRatio，duration 限 4/8/12
+    - low_cost: 传 aspectRatio，duration 限 10/15
 
-    Returns:
-        task_id: 用于后续 query_task 轮询
+    如果 duration 不在当前渠道合法值中，自动选最接近的。
     """
+    ch = _get_channel()
+
+    # 时长不合法时自动调整到最接近的合法值
+    if duration not in ch["durations"]:
+        duration = min(ch["durations"], key=lambda d: abs(int(d) - int(duration)))
+
     payload = {
         "imageUrl": image_url,
         "duration": duration,
-        "aspectRatio": aspect_ratio,
         "prompt": prompt,
-        "storyboard": storyboard,
     }
+    if ch["has_aspect_ratio"]:
+        payload["aspectRatio"] = aspect_ratio
+
+    endpoint = f"{config.RUNNINGHUB_BASE_URL}{ch['endpoint']}"
     async with httpx.AsyncClient(timeout=config.RUNNINGHUB_TIMEOUT) as client:
-        resp = await client.post(
-            f"{config.RUNNINGHUB_BASE_URL}/rhart-video-s/image-to-video",
-            headers=_headers(),
-            json=payload,
-        )
+        resp = await client.post(endpoint, headers=_headers(), json=payload)
         resp.raise_for_status()
         data = resp.json()
         if data.get("errorCode"):
