@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 团播资产画布 — Phase 0 骨架</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+</head>
+<body class="bg-gray-100">
+  <div class="flex h-screen">
+    <!-- 左栏：并发流水线卡片轨 -->
+    <div class="w-1/2 p-4 overflow-y-auto">
+      <div class="flex items-center justify-between mb-4">
+        <h1 class="text-xl font-bold">流水线卡片轨</h1>
+        <button onclick="addWorkflow()" class="bg-blue-600 text-white px-3 py-1.5 rounded hover:bg-blue-700">+ 新增流水线</button>
+      </div>
+      <div id="track" class="space-y-3"></div>
+    </div>
+
+    <!-- 右栏：Fabric.js 画布占位 + 上传测试 -->
+    <div class="w-1/2 p-4 border-l bg-white flex flex-col">
+      <h2 class="text-lg font-bold mb-2">Fabric.js 画布</h2>
+      <div class="border-2 border-dashed border-gray-300 rounded flex items-center justify-center h-80 text-gray-400">
+        Fabric.js 画布（Phase 2 接入）
+      </div>
+
+      <h3 class="text-sm font-semibold mt-4 mb-2 text-gray-600">资产上传测试（验收点 5）</h3>
+      <input id="uploadInput" type="file" accept="image/*" onchange="uploadAsset(this)" class="text-sm" />
+      <div id="uploadResult" class="text-xs mt-2"></div>
+    </div>
+  </div>
+
+  <script>
+    // workflows 数组数据驱动；每张卡片拥有独立轮询定时器，互不影响
+    let workflows = [];
+    const timers = {};  // wfId -> setInterval id
+
+    function uid() {
+      return Math.random().toString(36).slice(2, 10);
+    }
+
+    function addWorkflow() {
+      workflows.push({ id: uid(), mock_tid: null, status: 'idle', progress: 0, assets: null });
+      render();
+    }
+
+    function removeWorkflow(id) {
+      if (timers[id]) { clearInterval(timers[id]); delete timers[id]; }
+      workflows = workflows.filter(w => w.id !== id);
+      render();
+    }
+
+    async function runMock(id) {
+      const wf = workflows.find(w => w.id === id);
+      if (!wf) return;
+      wf.status = 'pending';
+      wf.progress = 0;
+      wf.assets = null;
+      render();
+      try {
+        const resp = await fetch('/api/stages/mock/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workflow_id: id })
+        });
+        const data = await resp.json();
+        wf.mock_tid = data.task_id;
+        pollTask(id, data.task_id);
+      } catch (e) {
+        wf.status = 'failed';
+        render();
+      }
+    }
+
+    // 每张卡片独立定时器，是核心验收点
+    function pollTask(id, taskId) {
+      timers[id] = setInterval(async () => {
+        try {
+          const resp = await fetch(`/api/tasks/${taskId}`);
+          if (!resp.ok) return;
+          const data = await resp.json();
+          const wf = workflows.find(w => w.id === id);
+          if (!wf) return;
+          wf.status = data.status;
+          wf.progress = data.progress;
+          wf.assets = data.assets;
+          render();
+          if (data.status === 'success' || data.status === 'failed') {
+            clearInterval(timers[id]);
+            delete timers[id];
+          }
+        } catch (e) { /* 网络抖动，下个 tick 重试 */ }
+      }, 1500);
+    }
+
+    async function uploadAsset(input) {
+      const file = input.files[0];
+      if (!file) return;
+      const fd = new FormData();
+      fd.append('file', file);
+      const out = document.getElementById('uploadResult');
+      out.textContent = '上传中...';
+      try {
+        const resp = await fetch('/api/assets/upload', { method: 'POST', body: fd });
+        const data = await resp.json();
+        out.innerHTML = `上传成功，URL: <a href="${data.url}" target="_blank" class="text-blue-600 underline break-all">${data.url}</a>`;
+      } catch (e) {
+        out.textContent = '上传失败: ' + e.message;
+      }
+    }
+
+    function badgeClasses(s) {
+      const map = {
+        idle: 'bg-gray-100 text-gray-700',
+        pending: 'bg-yellow-100 text-yellow-700',
+        running: 'bg-blue-100 text-blue-700',
+        success: 'bg-green-100 text-green-700',
+        failed: 'bg-red-100 text-red-700'
+      };
+      return map[s] || map.idle;
+    }
+
+    function isBusy(s) {
+      return s === 'running' || s === 'pending';
+    }
+
+    function render() {
+      const track = document.getElementById('track');
+      if (workflows.length === 0) {
+        track.innerHTML = '<div class="text-gray-400 text-center py-8">点击「+ 新增流水线」开始</div>';
+        return;
+      }
+      track.innerHTML = workflows.map(wf => `
+        <div class="bg-white rounded shadow p-3">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-semibold">卡片 ${wf.id}</span>
+            <div class="space-x-2">
+              <button onclick="runMock('${wf.id}')" ${isBusy(wf.status) ? 'disabled' : ''}
+                class="px-2 py-1 rounded text-white ${isBusy(wf.status) ? 'bg-gray-400' : 'bg-green-600 hover:bg-green-700'}">运行 mock</button>
+              <button onclick="removeWorkflow('${wf.id}')" class="px-2 py-1 rounded bg-red-500 text-white hover:bg-red-600">删除</button>
+            </div>
+          </div>
+          <div class="text-sm mb-1">状态：
+            <span class="px-2 rounded ${badgeClasses(wf.status)}">${wf.status}</span>
+          </div>
+          <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
+            <div class="bg-blue-500 h-3 transition-all" style="width:${wf.progress}%"></div>
+          </div>
+          <div class="text-xs text-gray-500 mt-1">进度 ${wf.progress}%</div>
+          ${wf.assets && wf.assets.character_png
+            ? `<div class="mt-2 text-xs"><a href="${wf.assets.character_png}" target="_blank" class="text-blue-600 underline">查看产出的占位资产</a></div>`
+            : ''}
+        </div>
+      `).join('');
+    }
+
+    render();
+  </script>
+</body>
+</html>
