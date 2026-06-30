@@ -1,4 +1,4 @@
-"""gpt-image 适配层（第三方中转 https://llm-api.net/v1）。
+"""gpt-image 适配层（同步渠道：llm-api 主 + xhub 兜底）。
 
 阶段一"主播形象加工"：参考图 + 发型/妆容/服装 → 背透 PNG。
 用 httpx 直接调 multipart /v1/images/edits（非 openai SDK，因中转响应
@@ -8,6 +8,8 @@
 分组有通道；-all 后缀在 default 分组无通道会 503）。
 
 429 退避重试：中转上游负载饱和时返回 429，按 5s/10s/20s 指数退避重试 3 次。
+同步 failover：llm-api 重试仍失败时，若 config.GPT_IMAGE_FAILOVER=true
+且 XHUB_API_KEY 已配置，自动切换到 xhub（newapi.pro）再试一轮。
 """
 import asyncio
 import base64
@@ -22,20 +24,124 @@ import config
 _RETRY_STATUSES = {429, 502, 503, 504}
 _RETRY_BACKOFFS = [5, 10, 20]  # 指数退避秒数，最多 3 次
 
+# 中转 API 请求体限制：参考图最长边超过此值时等比缩小，避免 429「文件大小超过限制」
+MAX_DIM = 2048
+
+
+# ───────────────────────── 同步渠道分发 ─────────────────────────
+
+class _ChannelBusinessError(RuntimeError):
+    """4xx 业务错误（400/401/403 等），不应切渠道，直接抛给调用方。"""
+
+
+class _ChannelExhausted(RuntimeError):
+    """429/5xx 重试耗尽或网络错误，应切下一个同步渠道。"""
+
+
+def _channels() -> list[tuple[str, str, str]]:
+    """返回启用的同步渠道列表 [(name, base_url, api_key), ...]。
+
+    顺序即优先级：llm-api 优先；failover 开启且 xhub key 配置时追加 xhub。
+    """
+    channels = [("llm-api", config.OPENAI_BASE_URL, config.OPENAI_API_KEY)]
+    if config.GPT_IMAGE_FAILOVER and config.XHUB_API_KEY:
+        channels.append(("xhub", config.XHUB_BASE_URL, config.XHUB_API_KEY))
+    return channels
+
+
+async def _post_edits_with_retry(
+    base_url: str, api_key: str, form_data: dict, files: dict
+) -> bytes:
+    """对单个渠道执行 429 退避重试 + raise_for_status，返回图像 bytes。"""
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    last_err: Exception | None = None
+    async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as client:
+        for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
+            if backoff:
+                await asyncio.sleep(backoff)
+            try:
+                resp = await client.post(
+                    f"{base_url}/images/edits",
+                    headers=headers,
+                    data=form_data,
+                    files=files,
+                )
+                if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
+                    last_err = _ChannelExhausted(
+                        f"gpt-image HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
+                    )
+                    continue
+                if resp.status_code in (401, 403):
+                    # 认证/权限错误：当前渠道不可用，切下一个渠道
+                    raise _ChannelExhausted(
+                        f"gpt-image HTTP {resp.status_code}: {resp.text}"
+                    )
+                if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                    # 业务错误（参数、文件格式等）：不重试，不切渠道
+                    raise _ChannelBusinessError(
+                        f"gpt-image HTTP {resp.status_code}: {resp.text}"
+                    )
+                resp.raise_for_status()
+                payload = resp.json()
+                return await _extract_image_bytes(payload)
+            except httpx.HTTPStatusError as e:
+                # 5xx：切渠道
+                raise _ChannelExhausted(
+                    f"gpt-image HTTP {e.response.status_code}: {e.response.text}"
+                ) from e
+            except httpx.HTTPError as e:
+                # 网络错误：重试或切渠道
+                if attempt < len(_RETRY_BACKOFFS):
+                    last_err = _ChannelExhausted(f"gpt-image 请求失败: {e}")
+                    continue
+                raise _ChannelExhausted(f"gpt-image 请求失败: {e}") from e
+    raise last_err or _ChannelExhausted("gpt-image 重试耗尽")
+
+
+async def _dispatch_edits(form_data: dict, files: dict) -> bytes:
+    """按渠道优先级依次尝试，429/5xx/网络错误自动切下一个同步渠道；4xx 直接抛。"""
+    last_err: Exception | None = None
+    for name, base_url, api_key in _channels():
+        try:
+            return await _post_edits_with_retry(base_url, api_key, form_data, files)
+        except _ChannelBusinessError:
+            # 4xx 业务错误：不切渠道
+            raise
+        except _ChannelExhausted as e:
+            last_err = e
+            # 切下一个渠道
+            continue
+    raise RuntimeError(
+        f"所有同步渠道均失败（llm-api + xhub）。最后错误: {last_err}"
+    )
+
 
 async def generate_character(
     reference_image_bytes: bytes,
-    hair: str,
-    makeup: str,
-    clothing: str,
+    hair_image_bytes: bytes | None = None,
+    makeup: str = "",
+    clothing_image_bytes: bytes | None = None,
 ) -> bytes:
-    """参考图 + 换装描述 → 背透 PNG bytes（可直接 storage.save）。
+    """参考图 + 发型/服装参考图 → 背透 PNG bytes（可直接 storage.save）。
+
+    将人物参考图与发型/服装参考图横向拼接为一张图（等高对齐 + 图间留白），
+    配合 prompt 描述布局，走 images/edits 接口。未提供的参考图跳过。
 
     Raises:
         RuntimeError: API 调用失败或响应无可用图像数据。
     """
-    rgb_bytes = _ensure_rgb(reference_image_bytes)
-    prompt = _build_prompt(hair, makeup, clothing)
+    parts = [("人物参考图", _load_rgb_image(reference_image_bytes))]
+    if hair_image_bytes:
+        parts.append(("发型参考图", _load_rgb_image(hair_image_bytes)))
+    if clothing_image_bytes:
+        parts.append(("服装参考图", _load_rgb_image(clothing_image_bytes)))
+
+    combined = _hconcat(parts, gap=24)
+    out = BytesIO()
+    combined.save(out, format="PNG", optimize=True)
+    combined_bytes = out.getvalue()
+
+    prompt = _build_image_prompt([p[0] for p in parts], makeup)
 
     form_data = {
         "model": config.GPT_IMAGE_MODEL,
@@ -45,46 +151,11 @@ async def generate_character(
         "background": "transparent",
         "n": "1",
     }
-    # thinking 参数中转文档未列，仅在配置非空时透传
     if config.GPT_IMAGE_THINKING:
         form_data["thinking"] = config.GPT_IMAGE_THINKING
 
-    headers = {
-        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-        "Accept": "application/json",
-    }
-
-    last_err: Exception | None = None
-    async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as client:
-        for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
-            if backoff:
-                await asyncio.sleep(backoff)
-            try:
-                resp = await client.post(
-                    f"{config.OPENAI_BASE_URL}/images/edits",
-                    headers=headers,
-                    data=form_data,
-                    files={"image": ("reference.png", rgb_bytes, "image/png")},
-                )
-                if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
-                    last_err = RuntimeError(
-                        f"gpt-image HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
-                    )
-                    continue
-                resp.raise_for_status()
-                payload = resp.json()
-                return await _extract_image_bytes(payload)
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(
-                    f"gpt-image HTTP {e.response.status_code}: {e.response.text}"
-                ) from e
-            except httpx.HTTPError as e:
-                if attempt < len(_RETRY_BACKOFFS):
-                    last_err = e
-                    continue
-                raise RuntimeError(f"gpt-image 请求失败: {e}") from e
-
-    raise RuntimeError(f"gpt-image 重试 {len(_RETRY_BACKOFFS)} 次仍失败: {last_err}")
+    files = {"image": ("reference.png", combined_bytes, "image/png")}
+    return await _dispatch_edits(form_data, files)
 
 
 async def _extract_image_bytes(payload: dict) -> bytes:
@@ -98,7 +169,6 @@ async def _extract_image_bytes(payload: dict) -> bytes:
         return base64.b64decode(b64)
     url = item.get("url")
     if url:
-        # URL 60 分钟过期，下载本地化
         async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as c:
             r = await c.get(url)
             r.raise_for_status()
@@ -106,26 +176,65 @@ async def _extract_image_bytes(payload: dict) -> bytes:
     raise RuntimeError(f"gpt-image 响应无 b64_json 也无 url: {item}")
 
 
-def _ensure_rgb(image_bytes: bytes) -> bytes:
-    """预处理参考图：强制转 RGBA 再白底合成 RGB。
+def _load_rgb_image(image_bytes: bytes) -> Image.Image:
+    """加载图片为 RGB PIL Image（白底合成 + 最长边 MAX_DIM 压缩）。
 
     免疫所有输入模式（P 调色盘、LA 灰度透明、L 灰度等），确保 gpt-image
     的 images.edit 接口不因 alpha 通道报错。强制 convert("RGBA") 后
-    split()[3] 必定存在且合法。
+    split()[3] 必定存在且合法。超过 MAX_DIM 的图等比缩小（LANCZOS）。
     """
     img = Image.open(BytesIO(image_bytes)).convert("RGBA")
+    w, h = img.size
+    longest = max(w, h)
+    if longest > MAX_DIM:
+        scale = MAX_DIM / longest
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
     bg = Image.new("RGB", img.size, (255, 255, 255))
     bg.paste(img, mask=img.split()[3])
+    return bg
+
+
+def _ensure_rgb(image_bytes: bytes) -> bytes:
+    """预处理参考图：转 RGB + 尺寸压缩，返回 PNG bytes（edit_image 路径使用）。"""
+    img = _load_rgb_image(image_bytes)
     out = BytesIO()
-    bg.save(out, format="PNG")
+    img.save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
-def _build_prompt(hair: str, makeup: str, clothing: str) -> str:
-    """拼装换装 prompt（中文，gpt-image 原生支持 CJK）。"""
+def _hconcat(parts: list[tuple[str, Image.Image]], gap: int = 24) -> Image.Image:
+    """横向拼接多张图，等高对齐（按最高图高度等比缩放），图间留白，整体限制 MAX_DIM。"""
+    target_h = max(p[1].height for p in parts)
+    scaled = []
+    for name, img in parts:
+        if img.height != target_h:
+            scale = target_h / img.height
+            img = img.resize((max(1, int(img.width * scale)), target_h), Image.LANCZOS)
+        scaled.append((name, img))
+    total_w = sum(p[1].width for p in scaled) + gap * (len(scaled) - 1)
+    canvas = Image.new("RGB", (total_w, target_h), (255, 255, 255))
+    x = 0
+    for _, img in scaled:
+        canvas.paste(img, (x, 0))
+        x += img.width + gap
+    longest = max(canvas.size)
+    if longest > MAX_DIM:
+        scale = MAX_DIM / longest
+        canvas = canvas.resize(
+            (max(1, int(canvas.width * scale)), max(1, int(canvas.height * scale))),
+            Image.LANCZOS,
+        )
+    return canvas
+
+
+def _build_image_prompt(part_names: list[str], makeup: str) -> str:
+    """拼装基于参考图布局的换装 prompt（中文，gpt-image 原生支持 CJK）。"""
+    layout = "从左到右依次为：" + "、".join(part_names) + "。"
     return (
-        "保持人物五官与参考图完全一致（必须是同一个人）。\n"
-        f"换装要求：发型={hair}，妆容={makeup}，服装={clothing}。\n"
+        f"参考图布局说明：{layout}\n"
+        "请基于「人物参考图」保持人物五官与身份完全一致（必须是同一个人），"
+        "应用「发型参考图」中的发型，换上「服装参考图」中的服装。\n"
+        f"妆容要求：{makeup or '自然清透'}。\n"
         "半身/全身站立姿态，自然光线，质感细腻。\n"
         "纯透明背景（用于后续海报合成）。\n"
         "高质量，画面中不要出现任何文字与水印。"
@@ -145,11 +254,10 @@ async def edit_image(
         mask_bytes: 可选遮罩 PNG bytes。透明区域（alpha=0）表示需要重绘，
                     非透明区域保持不变。传入时执行 inpainting 局部重绘。
 
-    与 generate_character 共用 _ensure_rgb / 429 重试 / _extract_image_bytes。
+    与 generate_character 共用 _ensure_rgb / 429 重试 / 同步 failover。
     """
     rgb_bytes = _ensure_rgb(reference_image_bytes)
 
-    # 有 mask 时执行局部重绘，不要求透明背景
     if mask_bytes:
         full_prompt = prompt + "\n高质量，画面中不要出现任何文字与水印。"
     else:
@@ -167,43 +275,8 @@ async def edit_image(
     if config.GPT_IMAGE_THINKING:
         form_data["thinking"] = config.GPT_IMAGE_THINKING
 
-    headers = {
-        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-        "Accept": "application/json",
-    }
-
     files = {"image": ("reference.png", rgb_bytes, "image/png")}
     if mask_bytes:
         files["mask"] = ("mask.png", mask_bytes, "image/png")
 
-    last_err: Exception | None = None
-    async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as client:
-        for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
-            if backoff:
-                await asyncio.sleep(backoff)
-            try:
-                resp = await client.post(
-                    f"{config.OPENAI_BASE_URL}/images/edits",
-                    headers=headers,
-                    data=form_data,
-                    files=files,
-                )
-                if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
-                    last_err = RuntimeError(
-                        f"gpt-image HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
-                    )
-                    continue
-                resp.raise_for_status()
-                payload = resp.json()
-                return await _extract_image_bytes(payload)
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(
-                    f"gpt-image HTTP {e.response.status_code}: {e.response.text}"
-                ) from e
-            except httpx.HTTPError as e:
-                if attempt < len(_RETRY_BACKOFFS):
-                    last_err = e
-                    continue
-                raise RuntimeError(f"gpt-image 请求失败: {e}") from e
-
-    raise RuntimeError(f"gpt-image 重试 {len(_RETRY_BACKOFFS)} 次仍失败: {last_err}")
+    return await _dispatch_edits(form_data, files)

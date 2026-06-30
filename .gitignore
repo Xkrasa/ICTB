@@ -9,6 +9,13 @@ env/
 # 生成的资产（运行时产物，不入库）
 assets/
 
+# 运行数据目录（批量/画布/主播/模板/运行时状态）
+batches/
+canvases/
+streamers/
+templates/
+runtime/
+
 # 日志与本地缓存
 *.log
 .DS_Store
@@ -18,3 +25,12 @@ assets/
 
 # brainstorming visual companion 临时 mockup
 .superpowers/
+
+# IDE 文档/计划（不入库）
+.trae/
+
+# 临时排查脚本和截图
+_temp*.js
+_check_syntax.py
+.tmp*.png
+test_face.png
