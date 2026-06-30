@@ -27,6 +27,15 @@ _RETRY_BACKOFFS = [5, 10, 20]  # 指数退避秒数，最多 3 次
 # 中转 API 请求体限制：参考图最长边超过此值时等比缩小，避免 429「文件大小超过限制」
 MAX_DIM = 2048
 
+_EDIT_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
+
+
+def _normalize_edit_size(size: str | None) -> str:
+    val = size or config.GPT_IMAGE_SIZE or "1024x1024"
+    if val not in _EDIT_SIZES:
+        raise ValueError(f"gpt-image edits 不支持 size={val}，仅支持 {sorted(_EDIT_SIZES)}")
+    return val
+
 
 # ───────────────────────── 同步渠道分发 ─────────────────────────
 
@@ -121,6 +130,7 @@ async def generate_character(
     hair_image_bytes: bytes | None = None,
     makeup: str = "",
     clothing_image_bytes: bytes | None = None,
+    size: str | None = None,
 ) -> bytes:
     """参考图 + 发型/服装参考图 → 背透 PNG bytes（可直接 storage.save）。
 
@@ -146,7 +156,7 @@ async def generate_character(
     form_data = {
         "model": config.GPT_IMAGE_MODEL,
         "prompt": prompt,
-        "size": config.GPT_IMAGE_SIZE,
+        "size": _normalize_edit_size(size),
         "quality": config.GPT_IMAGE_QUALITY,
         "background": "transparent",
         "n": "1",
@@ -245,6 +255,7 @@ async def edit_image(
     reference_image_bytes: bytes,
     prompt: str,
     mask_bytes: bytes | None = None,
+    size: str | None = None,
 ) -> bytes:
     """通用图像编辑：参考图 + prompt → PNG bytes。
 
@@ -266,7 +277,7 @@ async def edit_image(
     form_data = {
         "model": config.GPT_IMAGE_MODEL,
         "prompt": full_prompt,
-        "size": config.GPT_IMAGE_SIZE,
+        "size": _normalize_edit_size(size),
         "quality": config.GPT_IMAGE_QUALITY,
         "n": "1",
     }

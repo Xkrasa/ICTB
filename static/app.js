@@ -144,7 +144,7 @@
     function getDefaultData(type) {
       switch (type) {
         case 'image_input': return { image_url: null };
-        case 'gpt_image': return { prompt:'', hair_url:'', makeup:'', clothing_url:'', model:'gpt-image-2', aspect_ratio:'1:1', resolution:'1024x1024', image2_url:'', image3_url:'', image4_url:'' };
+        case 'gpt_image': return { prompt:'', hair_url:'', makeup:'', clothing_url:'', model:'gpt-image-2', size:'1024x1024', image2_url:'', image3_url:'', image4_url:'' };
         case 'remove_bg': return {};
         case 'mask_edit': return { mask_url: null };
         case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16', channel:'official' };
@@ -154,10 +154,8 @@
     const AI_IMAGE_MODEL_CFG = {
       'gpt-image-2': {
         label: 'GPT-image2.0',
-        resolutions: ['1024x1024', '1024x1536', '1536x1024'],
-        defaultRes: '1024x1024',
-        aspectRatios: ['16:9', '9:16', '1:1'],
-        defaultAspect: '16:9',
+        sizes: ['auto', '1024x1024', '1536x1024', '1024x1536'],
+        defaultSize: '1024x1024',
         cost: '≈0.03元'
       },
       'rh_gpt_image_i2i': {
@@ -307,15 +305,20 @@
         const cfg = AI_IMAGE_MODEL_CFG[model] || AI_IMAGE_MODEL_CFG['gpt-image-2'];
         const thumb = d.image_url ? `<img src="${d.image_url}" />` : `<span class="gen-thumb-empty">?</span>`;
         const prompt = d.prompt || getDefaultImagePrompt();
+        const isGptImage2 = model === 'gpt-image-2';
+        const size = d.size || d.resolution || cfg.defaultSize || '1024x1024';
         const ar = d.aspect_ratio || cfg.defaultAspect;
         const res = d.resolution || cfg.defaultRes;
         const modelOptions = Object.entries(AI_IMAGE_MODEL_CFG).map(([k,v]) =>
           `<option value="${k}" ${k===model?'selected':''}>${v.label}</option>`
         ).join('');
-        const resOptions = cfg.resolutions.map(r =>
+        const sizeOptions = (cfg.sizes || []).map(s =>
+          `<option value="${s}" ${s===size?'selected':''}>${s}</option>`
+        ).join('');
+        const resOptions = (cfg.resolutions || []).map(r =>
           `<option value="${r}" ${r===res?'selected':''}>${r}</option>`
         ).join('');
-        const arOptions = cfg.aspectRatios.map(a =>
+        const arOptions = (cfg.aspectRatios || []).map(a =>
           `<option value="${a}" ${a===ar?'selected':''}>${a}</option>`
         ).join('');
         const refSlot = (field, label) => `
@@ -346,12 +349,16 @@
             <select class="gen-model" onchange="setNodeModel('${node.id}',this.value)">
               ${modelOptions}
             </select>
-            <select class="gen-ratio" onchange="updateNodeData('${node.id}','aspect_ratio',this.value)">
-              ${arOptions}
-            </select>
-            <select class="gen-ratio" onchange="updateNodeData('${node.id}','resolution',this.value)">
-              ${resOptions}
-            </select>
+            ${isGptImage2 ? `
+              <select class="gen-ratio" onchange="updateNodeData('${node.id}','size',this.value)">
+                ${sizeOptions}
+              </select>` : `
+              <select class="gen-ratio" onchange="updateNodeData('${node.id}','aspect_ratio',this.value)">
+                ${arOptions}
+              </select>
+              <select class="gen-ratio" onchange="updateNodeData('${node.id}','resolution',this.value)">
+                ${resOptions}
+              </select>`}
             <div class="spacer"></div>
             <button class="magic-btn" onclick="polishPrompt('${node.id}')">润色</button>
             <div class="cost">${cfg.cost}</div>
@@ -429,6 +436,11 @@
       if (node.data.image2_url == null) node.data.image2_url = '';
       if (node.data.image3_url == null) node.data.image3_url = '';
       if (node.data.image4_url == null) node.data.image4_url = '';
+      if (node.data.model === 'gpt-image-2') {
+        if (node.data.resolution && !node.data.size) node.data.size = node.data.resolution;
+        if (!cfg.sizes.includes(node.data.size)) node.data.size = cfg.defaultSize;
+        return;
+      }
       if (!cfg.resolutions.includes(node.data.resolution)) node.data.resolution = cfg.defaultRes;
       if (!cfg.aspectRatios.includes(node.data.aspect_ratio)) node.data.aspect_ratio = cfg.defaultAspect;
     }
@@ -446,11 +458,16 @@
       if (!node) return;
       const cfg = AI_IMAGE_MODEL_CFG[model] || AI_IMAGE_MODEL_CFG['gpt-image-2'];
       node.data.model = model;
-      if (!cfg.aspectRatios.includes(node.data.aspect_ratio)) {
-        node.data.aspect_ratio = cfg.defaultAspect;
-      }
-      if (!cfg.resolutions.includes(node.data.resolution)) {
-        node.data.resolution = cfg.defaultRes;
+      if (model === 'gpt-image-2') {
+        if (node.data.resolution && !node.data.size) node.data.size = node.data.resolution;
+        if (!cfg.sizes.includes(node.data.size)) node.data.size = cfg.defaultSize;
+      } else {
+        if (!cfg.aspectRatios.includes(node.data.aspect_ratio)) {
+          node.data.aspect_ratio = cfg.defaultAspect;
+        }
+        if (!cfg.resolutions.includes(node.data.resolution)) {
+          node.data.resolution = cfg.defaultRes;
+        }
       }
       refreshNodeBody(nodeId);
     }

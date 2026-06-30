@@ -533,7 +533,7 @@ async def _exec_gpt_image_sync(
     makeup = params.get("makeup", "")
     clothing_url = params.get("clothing_url")
     mask_url = params.get("mask_url")
-    resolution = params.get("resolution", "1024x1024")
+    size = params.get("size") or params.get("resolution") or config.GPT_IMAGE_SIZE
 
     registry.update(f"{canvas_id}:{node_id}", progress=15)
     ref_bytes = await storage.download(ref_url)
@@ -552,6 +552,7 @@ async def _exec_gpt_image_sync(
             ref_bytes,
             prompt or "在遮罩区域重新生成，保持自然过渡",
             mask_bytes=mask_bytes,
+            size=size,
         )
     elif hair_url or clothing_url:
         # 图片换装：下载发型/服装参考图，拼接走 generate_character
@@ -559,12 +560,13 @@ async def _exec_gpt_image_sync(
         clothing_bytes = await storage.download(clothing_url) if clothing_url else None
         registry.update(f"{canvas_id}:{node_id}", progress=35)
         png_bytes = await gpt_image.generate_character(
-            ref_bytes, hair_bytes, makeup, clothing_bytes
+            ref_bytes, hair_bytes, makeup, clothing_bytes, size=size
         )
     else:
         png_bytes = await gpt_image.edit_image(
             ref_bytes,
             prompt or "保持人物特征，优化画面质量",
+            size=size,
         )
 
     url = await storage.save(png_bytes, "png")
