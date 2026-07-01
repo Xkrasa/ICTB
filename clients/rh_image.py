@@ -1,7 +1,8 @@
 """RunningHub 工作流生图适配层（异步渠道）。
 
-接入 3 个 RH AI 应用工作流（节点类型不同 → 模型效果不同 → 用户独立选择）：
+接入 RH AI 应用工作流：
 - rh_gpt_image_i2i: workflow 2046794946094571522（gpt-image-2 低价版图生图）
+- rh_gpt_image_t2i: workflow 2046794551444119554（gpt-image-2 低价版文生图）
 - nano_banana_pro:  workflow 1965678974313578497（nano banana pro）
 - nano_banana_2:    workflow 2067967606665076738（nano banana 2.0，支持 1-4 张参考图）
 
@@ -20,6 +21,7 @@ from clients import runninghub
 # ───────────────────────── 工作流常量 ─────────────────────────
 
 WF_RH_GPT_IMAGE_I2I = "2046794946094571522"  # gpt-image-2 低价版图生图
+WF_RH_GPT_IMAGE_T2I = "2046794551444119554"  # gpt-image-2 低价版文生图
 WF_NANO_BANANA_PRO = "1965678974313578497"   # nano banana pro
 WF_NANO_BANANA_2 = "2067967606665076738"     # nano banana 2.0
 
@@ -133,6 +135,22 @@ async def rh_gpt_image_i2i(
         _node("4", "prompt", prompt, "输入文本"),
     ])
     return await _run_workflow_and_wait(WF_RH_GPT_IMAGE_I2I, nodes, on_progress, on_submitted)
+
+
+async def rh_gpt_image_t2i(
+    prompt: str,
+    aspect_ratio: str = "9:16",
+    resolution: str = "1k",
+    on_progress=None,
+    on_submitted=None,
+) -> bytes:
+    """RH gpt-image-2 低价版文生图（workflow 2046794551444119554）。"""
+    nodes = [
+        _node("18", "aspectRatio", aspect_ratio, "设置比例"),
+        _node("18", "resolution", resolution, "分辨率"),
+        _node("18", "prompt", prompt, "输入文本"),
+    ]
+    return await _run_workflow_and_wait(WF_RH_GPT_IMAGE_T2I, nodes, on_progress, on_submitted)
 
 
 async def nano_banana_pro(

@@ -537,7 +537,7 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
     model = params.get("model", "gpt-image-2")
     logger.info("exec_gpt_image model=%s", model)
     ref_url = params.get("image_url")
-    if not ref_url:
+    if not ref_url and model != "rh_gpt_image_i2i":
         raise ValueError("gpt_image 节点缺少输入图片（请连线 image_input 或上游节点）")
 
     prompt = params.get("prompt", "")
@@ -552,23 +552,37 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
 
     # 以下走 RH 工作流异步渠道
     if len(prompt) < 5:
-        prompt = "基于参考图生成高质量图像，保持人物特征。"
+        if model == "rh_gpt_image_i2i" and not (ref_url or params.get("image2_url")):
+            prompt = "生成高质量商业海报图像，画面精致，细节丰富。"
+        else:
+            prompt = "基于参考图生成高质量图像，保持人物特征。"
 
-    ref_bytes = await storage.download(ref_url)
     registry.update(f"{canvas_id}:{node_id}", progress=10)
 
     if model == "rh_gpt_image_i2i":
-        img2_bytes = None
-        if params.get("image2_url"):
-            img2_bytes = await storage.download(params["image2_url"])
-        png_bytes = await rh_image.rh_gpt_image_i2i(
-            ref_bytes, img2_bytes, prompt, aspect_ratio, resolution,
-            on_progress=_rh_progress_cb(canvas_id, node_id),
-            on_submitted=lambda tid: registry.update(
-                f"{canvas_id}:{node_id}", external_task_id=tid
-            ),
-        )
+        primary_url = ref_url or params.get("image2_url")
+        if primary_url:
+            ref_bytes = await storage.download(primary_url)
+            img2_bytes = None
+            if ref_url and params.get("image2_url"):
+                img2_bytes = await storage.download(params["image2_url"])
+            png_bytes = await rh_image.rh_gpt_image_i2i(
+                ref_bytes, img2_bytes, prompt, aspect_ratio, resolution,
+                on_progress=_rh_progress_cb(canvas_id, node_id),
+                on_submitted=lambda tid: registry.update(
+                    f"{canvas_id}:{node_id}", external_task_id=tid
+                ),
+            )
+        else:
+            png_bytes = await rh_image.rh_gpt_image_t2i(
+                prompt, aspect_ratio, resolution,
+                on_progress=_rh_progress_cb(canvas_id, node_id),
+                on_submitted=lambda tid: registry.update(
+                    f"{canvas_id}:{node_id}", external_task_id=tid
+                ),
+            )
     elif model == "nano_banana_pro":
+        ref_bytes = await storage.download(ref_url)
         png_bytes = await rh_image.nano_banana_pro(
             ref_bytes, prompt, aspect_ratio, resolution,
             on_progress=_rh_progress_cb(canvas_id, node_id),
@@ -577,6 +591,7 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
             ),
         )
     elif model == "nano_banana_2":
+        ref_bytes = await storage.download(ref_url)
         extra_urls = [
             params.get("image2_url"),
             params.get("image3_url"),

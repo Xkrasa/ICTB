@@ -161,10 +161,10 @@
         cost: '≈0.03元'
       },
       'rh_gpt_image_i2i': {
-        label: 'RH gpt-image 图生图',
+        label: 'RH gpt低价',
         resolutions: ['1k', '2k', '4k'],
         defaultRes: '1k',
-        aspectRatios: ['9:16', '16:9', '1:1', '4:3', '3:4', '4:5'],
+        aspectRatios: ['9:16', '16:9', '1:1', '4:3', '3:4', '3:2', '2:3', '5:4', '4:5', '21:9'],
         defaultAspect: '9:16',
         cost: 'RH 低价版'
       },
@@ -342,7 +342,7 @@
         if (model === 'gpt-image-2') {
           refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('hair_url','参考图2 · 发型')}${refSlot('clothing_url','参考图3 · 服装')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">图1=主体图（来自上游），按顺序传入</div>`;
         } else if (model === 'rh_gpt_image_i2i') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2')}</div>`;
+          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2（可选）')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">有主体图/参考图=图生图；无图=文生图</div>`;
         } else if (model === 'nano_banana_2') {
           refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2')}${refSlot('image3_url','参考图3')}${refSlot('image4_url','参考图4')}</div>`;
         }
