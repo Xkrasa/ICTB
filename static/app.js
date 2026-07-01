@@ -1065,7 +1065,24 @@
         t.setAttribute('d', p);
       }
     });
-    document.addEventListener('mouseup', () => {
+    document.addEventListener('mouseup', (e) => {
+      if (isConnecting && connStart) {
+        const t = document.elementFromPoint(e.clientX, e.clientY);
+        if (t && t.classList.contains('port-in')) {
+          const tn = t.closest('.node');
+          if (tn && tn.dataset.id !== connStart) {
+            const id = tn.dataset.id;
+            if (!canvasData.connections.some(c=>c.from===connStart&&c.to===id)) {
+              pushHistory();
+              canvasData.connections.push({ id: uid(), from: connStart, to: id });
+              renderConnections(); updateStatusbar(); autoSave();
+            }
+          }
+        }
+        isConnecting = false; connStart = null;
+        const temp = document.getElementById('svg-layer').querySelector('.conn-temp');
+        if (temp) temp.remove();
+      }
       if (isPanning) { isPanning = false; viewport.classList.remove('panning'); }
       if (!isBoxSelecting) return;
       isBoxSelecting = false;
