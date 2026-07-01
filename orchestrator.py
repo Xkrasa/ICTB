@@ -10,6 +10,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import struct
 import time
 import uuid
@@ -44,45 +45,103 @@ def _task_key_to_filename(key: str) -> str:
 
 
 class TaskRegistry:
-    """任务注册表，带 JSON 快照持久化。
+    """任务注册表，SQLite 持久化 + 内存读缓存。
 
-    - set/update 时根据变更类型决定是否写盘：终态必写，进度每 10% 写一次。
-    - 启动时从快照恢复：终态节点原样恢复，运行中节点标记为 interrupted。
+    - 内存字典作为读缓存，SQLite 作为持久存储（write-through）。
+    - 启动时从 SQLite 恢复：运行中任务标记为 interrupted，
+      避免进程重启后无后台协程接管的任务永久卡在 running。
+    - 旧的 runtime/tasks/*.json 快照不再使用，启动时自动迁移。
     """
 
     # 终态：一旦进入这些状态，必须立即持久化
     _TERMINAL_STATES = {"success", "failed", "blocked", "interrupted"}
 
-    def __init__(self) -> None:
+    def __init__(self, db_path: str = "runtime/tasks.db") -> None:
         self._tasks: dict = {}
-        self._last_persisted_progress: dict[str, int] = {}  # key → 上次写盘时的 progress
-        RUNTIME_TASKS_DIR.mkdir(parents=True, exist_ok=True)
-        self._restore_from_disk()
+        self._last_persisted_progress: dict[str, int] = {}
+        self._db_path = db_path
+        self._init_db()
+        self._restore_from_db()
+        self._migrate_json_snapshots()
 
-    def _restore_from_disk(self) -> None:
-        """从磁盘快照恢复任务状态。"""
+    def _init_db(self) -> None:
+        """初始化 SQLite 表结构。"""
+        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self._db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_records (
+                key TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def _restore_from_db(self) -> None:
+        """从 SQLite 恢复任务状态到内存缓存。"""
+        conn = sqlite3.connect(self._db_path)
+        try:
+            rows = conn.execute("SELECT key, data FROM task_records").fetchall()
+            for key, data_json in rows:
+                try:
+                    rec = json.loads(data_json)
+                except json.JSONDecodeError:
+                    continue
+                self._tasks[key] = rec
+                self._last_persisted_progress[key] = rec.get("progress", 0)
+        finally:
+            conn.close()
+
+    def _migrate_json_snapshots(self) -> None:
+        """一次性迁移旧的 runtime/tasks/*.json 快照到 SQLite，迁移后删除。"""
         if not RUNTIME_TASKS_DIR.exists():
             return
-        for f in RUNTIME_TASKS_DIR.glob("*.json"):
+        json_files = list(RUNTIME_TASKS_DIR.glob("*.json"))
+        if not json_files:
+            return
+        conn = sqlite3.connect(self._db_path)
+        try:
+            for f in json_files:
+                try:
+                    rec = json.loads(f.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                key = f.stem.replace("__", ":")
+                # 旧快照中运行中任务标记为 interrupted（兼容旧数据）
+                if rec.get("status") in ("pending", "running"):
+                    rec["status"] = "interrupted"
+                    rec["error"] = "服务重启，任务已中断，请重试"
+                conn.execute(
+                    "INSERT OR REPLACE INTO task_records (key, data) VALUES (?, ?)",
+                    (key, json.dumps(rec, ensure_ascii=False)),
+                )
+                self._tasks[key] = rec
+                self._last_persisted_progress[key] = rec.get("progress", 0)
+            conn.commit()
+        finally:
+            conn.close()
+        # 迁移完成后删除旧快照文件
+        for f in json_files:
             try:
-                rec = json.loads(f.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            key = f.stem.replace("__", ":")
-            # 运行中/排队节点标记为 interrupted
-            if rec.get("status") in ("pending", "running"):
-                rec["status"] = "interrupted"
-                rec["error"] = "服务重启，任务已中断，请重试"
-            self._tasks[key] = rec
-            self._last_persisted_progress[key] = rec.get("progress", 0)
+                f.unlink()
+            except OSError:
+                pass
+        logger.info("migrated %d JSON snapshots to SQLite", len(json_files))
 
     def _persist(self, key: str, rec: dict) -> None:
-        """将单条记录写入磁盘快照。"""
+        """将单条记录写入 SQLite（write-through）。"""
         try:
-            fpath = RUNTIME_TASKS_DIR / _task_key_to_filename(key)
-            fpath.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO task_records (key, data) VALUES (?, ?)",
+                    (key, json.dumps(rec, ensure_ascii=False)),
+                )
+                conn.commit()
+            finally:
+                conn.close()
             self._last_persisted_progress[key] = rec.get("progress", 0)
-        except OSError:
+        except (sqlite3.Error, OSError):
             pass  # 持久化失败不影响内存逻辑
 
     def _should_persist(self, key: str, rec: dict, fields: dict) -> bool:

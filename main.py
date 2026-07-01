@@ -193,6 +193,7 @@ async def get_node_status(canvas_id: str, node_id: str):
         "progress": rec["progress"],
         "image_url": rec.get("image_url"),
         "video_url": rec.get("video_url"),
+        "mask_url": rec.get("mask_url"),
         "error": rec.get("error"),
     }
 

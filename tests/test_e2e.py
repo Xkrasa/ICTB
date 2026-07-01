@@ -181,7 +181,6 @@ class TestCanvasCRUD:
 class TestCanvasRun:
     """画布执行（DAG 级联）"""
 
-    @pytest.mark.skip(reason="需对非 --reload 模式服务器运行（可通过 tests/start_server.ps1 启动），防 --reload 重启导致任务中断")
     def test_run_image_input_chain(self):
         """测试 image_input → gpt_image 链路（gpt-image-2 同步渠道）"""
         url = _upload_png()
@@ -220,6 +219,34 @@ class TestCanvasRun:
             "connections": [],
         })
         assert r.status_code == 200
+
+    def test_run_mask_edit_chain(self):
+        """测试 image_input → mask_edit 链路：透传 image_url 并产出 mask_url"""
+        image_url = _upload_png()
+        mask_url = _upload_png()
+        r = _post("/api/canvas/run", json={
+            "nodes": [
+                {"id": "img1", "type": "image_input", "x": 100, "y": 100, "data": {"image_url": image_url}},
+                {"id": "mask1", "type": "mask_edit", "x": 400, "y": 100, "data": {"mask_url": mask_url}},
+            ],
+            "connections": [{"id": "c1", "from": "img1", "to": "mask1"}],
+        })
+        assert r.status_code == 200, f"canvas run failed: {r.text}"
+        canvas_id = r.json()["canvas_id"]
+
+        deadline = time.time() + 30
+        mask_status = None
+        while time.time() < deadline:
+            r2 = _get(f"/api/canvas/{canvas_id}/nodes/mask1")
+            assert r2.status_code == 200
+            mask_status = r2.json()
+            if mask_status["status"] in ("success", "failed", "blocked"):
+                break
+            time.sleep(1)
+
+        assert mask_status["status"] == "success", f"mask1 status={mask_status.get('status')} error={mask_status.get('error')}"
+        assert mask_status.get("image_url") == image_url
+        assert mask_status.get("mask_url") == mask_url
 
     def test_node_status_404(self):
         r = _get("/api/canvas/nonexistent/nodes/n1")
@@ -422,7 +449,6 @@ class TestBatchOperations:
 class TestPhase1Compat:
     """Phase 1 兼容路由"""
 
-    @pytest.mark.skip(reason="需对非 --reload 模式服务器运行（可通过 tests/start_server.ps1 启动），防 --reload 重启导致任务中断")
     def test_mock_run_and_poll(self):
         r = _post("/api/stages/mock/run", json={"workflow_id": "wf_test"})
         assert r.status_code == 200
@@ -446,7 +472,6 @@ class TestPhase1Compat:
 class TestErrorHandling:
     """错误处理边界"""
 
-    @pytest.mark.skip(reason="需对非 --reload 模式服务器运行（可通过 tests/start_server.ps1 启动），防 --reload 重启导致任务中断")
     def test_canvas_run_missing_input(self):
         """gpt_image 节点缺少输入图片应报错"""
         r = _post("/api/canvas/run", json={
