@@ -181,6 +181,7 @@ class TestCanvasCRUD:
 class TestCanvasRun:
     """画布执行（DAG 级联）"""
 
+    @pytest.mark.skip(reason="需对非 --reload 模式服务器运行（可通过 tests/start_server.ps1 启动），防 --reload 重启导致任务中断")
     def test_run_image_input_chain(self):
         """测试 image_input → gpt_image 链路（gpt-image-2 同步渠道）"""
         url = _upload_png()
@@ -421,7 +422,7 @@ class TestBatchOperations:
 class TestPhase1Compat:
     """Phase 1 兼容路由"""
 
-    @pytest.mark.skip(reason="需对非 --reload 模式服务器运行；--reload 会清空内存中 TaskRegistry")
+    @pytest.mark.skip(reason="需对非 --reload 模式服务器运行（可通过 tests/start_server.ps1 启动），防 --reload 重启导致任务中断")
     def test_mock_run_and_poll(self):
         r = _post("/api/stages/mock/run", json={"workflow_id": "wf_test"})
         assert r.status_code == 200
@@ -445,7 +446,7 @@ class TestPhase1Compat:
 class TestErrorHandling:
     """错误处理边界"""
 
-    @pytest.mark.skip(reason="需对非 --reload 模式服务器运行；--reload 会清空内存中 TaskRegistry")
+    @pytest.mark.skip(reason="需对非 --reload 模式服务器运行（可通过 tests/start_server.ps1 启动），防 --reload 重启导致任务中断")
     def test_canvas_run_missing_input(self):
         """gpt_image 节点缺少输入图片应报错"""
         r = _post("/api/canvas/run", json={
