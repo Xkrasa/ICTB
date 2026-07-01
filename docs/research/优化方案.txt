@@ -1,0 +1,266 @@
+模型一更稳，模型二有些点过度设计/存在风险。  
+建议采用“模型一为主 + 模型二的部分交互优化”，不要一次性把所有方案都做进去。
+总体判断
+推荐采纳
+
+- 图片点击放大
+- Ctrl+C / Ctrl+V 复制粘贴
+- 上传槽位清除
+- 拖拽松手连线
+- 单击节点后可运行当前链路
+- 视频节点处理 video_url
+- 参考图顺序文案说明
+- gpt-image-2 size 参数链路验证
+暂不建议采纳
+- gpt-image-2 输出后强制裁切 1:1
+- 没有文档就接 RH 文生图 workflow
+- 多上游图片按 Y 坐标自动分配图1/图2/图3
+- 立即做真实物理删除 assets 文件
+对 9 个问题的最终修复方案
+1. 图片参数上传是否区分图1图2，是否有顺序
+当前情况
+当前是有顺序的，但 UI 不清楚。
+gpt-image-2
+image_url      = 图1，来自上游主体图
+hair_url       = 图2，发型参考图
+clothing_url   = 图3，服装参考图
+后端拼图顺序也是：
+人物参考图 → 发型参考图 → 服装参考图
+RH gpt-image 图生图
+image_url   = 图1
+image2_url  = 图2
+Nano Banana 2
+image_url   = 图1
+image2_url  = 图2
+image3_url  = 图3
+image4_url  = 图4
+不建议
+不建议现在做模型二说的：
+多个上游按 Y 坐标自动分配图1/图2/图3
+原因：当前画布节点只有一个输入口，没有 typed port。自动按 Y 坐标分配容易产生隐性错误。
+推荐修复
+先做低风险 UI 文案：
+图1：主体图，来自上游
+图2：发型/风格参考图
+图3：服装参考图
+并在不同模型下显示不同说明。
+2. 生成图片卡片无法点击打开
+推荐采纳
+这是低风险高收益。
+修法
+给这些地方加点击打开：
+- 节点主预览图 .node-preview img
+- gpt_image 缩略图 .gen-thumb img
+- 参考图槽位 .ref-upload img
+- mask 预览图
+- 候选图
+- 视频图/视频
+复用已有：
+openLightbox(url, isVideo)
+注意
+视频节点要传：
+isVideo = true
+3. Shift 框选后 Ctrl+C / Ctrl+V 复制粘贴
+推荐采纳
+很好，符合正常软件习惯。
+修法
+新增内存剪贴板：
+let clipboardGraph = null;
+Ctrl+C
+优先级：
+如果 selectedNodes.size > 0：
+    复制框选节点 + 内部连线
+否则如果 selectedNode：
+    复制 selectedNode 所在链路
+Ctrl+V
+重新生成节点 id
+连线 from/to 映射到新 id
+坐标整体 +40,+40
+插入画布
+自动选中新复制节点
+不做
+不写入系统剪贴板，只用页面内存即可。
+4. 上传素材无法删掉
+推荐做“清除引用”，暂不做“物理删除”
+当前上传后只是存在：
+node.data.image_url
+node.data.hair_url
+node.data.clothing_url
+node.data.image2_url
+...
+第一版修法
+每个上传槽位右上角加 ×：
+点击后清空对应字段
+刷新节点
+autoSave
+例如：
+clearNodeField(nodeId, 'hair_url')
+暂不建议
+不建议现在做：
+DELETE /api/assets/delete?url=...
+因为同一素材可能被多个节点、模板、主播、批次引用。直接删物理文件可能破坏历史任务。
+5. gpt-image-2 size 选 1024x1024，但实际不是 1:1
+当前代码层面已经修了一部分
+现在前端 gpt-image-2 只显示 size，后端也会把 size 传给 edits 接口。
+支持值：
+auto
+1024x1024
+1536x1024
+1024x1536
+不建议采纳模型二的裁切方案
+模型二说：
+API 返回后裁切左侧第一块面板，强制变成 1:1
+这个风险很大，不建议做。
+原因：
+- API 返回的不是“拼接原图”，而是模型生成结果。
+- 如果强行按拼接图第一块裁切，可能把成品人物裁坏。
+- 这属于后处理硬裁，不是接口参数对齐。
+推荐修法
+增加真实尺寸验证：
+保存生成图前/后用 PIL 读取 width/height
+写入 registry：
+  width
+  height
+前端显示：
+输出尺寸：1024 × 1024
+这样可以判断到底是：
+参数没生效
+接口忽略 size
+还是前端预览 object-fit 造成误判
+6. RH gpt-image2.0 文生图未接入
+当前情况
+当前 RH gpt-image 只有图生图：
+rh_gpt_image_i2i
+必须有输入图。
+不建议直接采纳模型二
+模型二给了一个 workflow：
+2046794551444119554
+如果这个不是你确认过的正式文档，不建议直接接。  
+RunningHub 工作流的 nodeId 很关键，不能猜。
+推荐方案
+等你提供 RH 文生图文档后再做：
+model: rh_gpt_image_t2i
+该模式：
+不要求 image_url
+只需要 prompt + aspect_ratio + resolution
+后端新增：
+rh_image.rh_gpt_image_t2i(...)
+7. 连线改成 RunningHub / ComfyUI 式拖拽松手连接
+推荐采纳
+当前代码已经有临时线，只是完成连接逻辑不够自然。
+当前问题
+现在是：
+输出口 mousedown
+拖线
+需要在输入口再次 mousedown 才完成
+修法
+改成：
+输出口 mousedown
+mousemove 画临时线
+document mouseup 时检查 elementFromPoint
+如果是 .port-in → 建立连接
+否则取消
+这部分模型二方案合理。
+8. 点击节点无法选中运行，必须框选
+推荐采纳
+当前问题明确：
+selectedNode      // 单选节点
+selectedNodes     // 框选/Shift多选
+但 runSelected() 只看 selectedNodes。
+修法
+改成：
+function runSelected() {
+    if (selectedNodes.size > 0) {
+    runCanvas([...selectedNodes]);
+    } else if (selectedNode) {
+    runCanvas([...getChainNodeIds(selectedNode)]);
+    } else {
+    alert('请先选择节点');
+    }
+}
+按钮文案也同步：
+单选节点：运行当前链路
+多选节点：运行选中 (N)
+无选择：运行选中 (0)
+9. 视频节点无法接收到 AI 生图结果
+这里要拆成两个问题
+9.1 后端级联注入问题
+当前后端逻辑是：
+if upstream_rec.get("image_url") and not downstream_data.get("image_url"):
+    downstream_data["image_url"] = upstream_rec["image_url"]
+如果视频节点之前已经有旧 image_url，就不会被新 AI 图覆盖。
+修法
+对连线输入允许覆盖：
+if upstream_rec.get("image_url"):
+    downstream_data["image_url"] = upstream_rec["image_url"]
+至少对下游这些节点生效：
+gpt_image
+remove_bg
+mask_edit
+seedance_video
+9.2 前端视频结果展示问题
+当前 updateNodeUI() 只处理：
+d.image_url
+没有处理：
+d.video_url
+修法
+if (d.video_url) {
+    node.data.video_url = d.video_url;
+    refreshNodePreview(nodeId);
+}
+视频节点渲染：
+if (d.video_url) {
+  <video src="..." controls muted loop>
+}
+getCompareOutputs() 也要支持：
+rt.video_url || node.data.video_url
+我建议的最终实施顺序
+第一批：P0，先修主流程
+这批直接影响你手动跑流程。
+1. 视频节点接收 AI 图
+- 后端级联覆盖下游 image_url
+- 前端处理 video_url
+- 视频节点渲染 <video>
+2. 单击节点可运行当前链路
+- 修 runSelected()
+- 修按钮状态
+3. 生成图片点击打开
+- 节点预览图 / 候选图 / 视频可点击 lightbox
+4. gpt-image-2 输出尺寸验证
+- 后端记录实际 width/height
+- 前端显示实际尺寸
+第二批：P1，提升效率
+5. Ctrl+C / Ctrl+V 复制粘贴
+6. 上传槽位清除按钮
+7. 参考图顺序文案优化
+第三批：P2，较大功能
+ 8. 拖拽松手连接
+ 9. RH gpt-image 文生图
+10. 真实素材库/物理删除
+对两个模型方案的取舍
+模型一
+整体更稳，适合采纳。
+需要修正的一点：
+它说当前没有临时连线视觉反馈，这不准确。
+代码里已有 conn-temp 临时线。
+但方案方向是对的。
+模型二
+部分很有价值：
+- Ctrl+C / Ctrl+V
+- 拖拽松手连接
+- 视频预览
+- 单击运行
+- 素材清除
+但有三个点不建议直接做：
+1. gpt-image 输出后强制裁切 1:1
+2. 未确认文档就接 RH 文生图 workflow
+3. 多上游按 Y 坐标自动分配图1/图2/图3
+我的建议
+先做：
+P0：问题 2、8、9、5 的验证显示
+也就是：
+图片点击打开
+单击运行链路
+视频节点接收/显示结果
+输出真实尺寸显示
+这批风险最低，最影响你现在手动跑流程。确认后我再开始改。

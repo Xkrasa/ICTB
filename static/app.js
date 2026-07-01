@@ -73,6 +73,7 @@
       canvasData.nodes.forEach(renderNode);
       renderConnections();
       updateStatusbar();
+      updateRunSelectedBtn();
       autoSave();
     }
     function undo() {
@@ -188,7 +189,7 @@
       canvasData.connections = canvasData.connections.filter(c => c.from !== id && c.to !== id);
       canvasData.nodes = canvasData.nodes.filter(n => n.id !== id);
       if (nodeElements[id]) { nodeElements[id].remove(); delete nodeElements[id]; }
-      if (selectedNode === id) selectedNode = null;
+      if (selectedNode === id) { selectedNode = null; updateRunSelectedBtn(); }
       if (selectedNodes.has(id)) { selectedNodes.delete(id); updateRunSelectedBtn(); }
       stopPolling(id);
       renderConnections();
@@ -293,9 +294,12 @@
       const d = node.data;
       let html = '';
       if (d.image_url) {
-        html += `<div class="node-preview"><div class="checkerboard"></div><img src="${d.image_url}" /></div>`;
+        html += `<div class="node-preview" onclick="openLightbox('${d.image_url}')"><div class="checkerboard"></div><img src="${d.image_url}" /></div>`;
       } else {
         html += `<div class="node-preview"><div class="checkerboard"></div><span class="preview-placeholder"></span></div>`;
+      }
+      if (d._width && d._height) {
+        html += `<div class="node-dim">${d._width} x ${d._height}</div>`;
       }
       if (node.type === 'image_input') {
         html += `<label class="upload-btn" for="upload-${node.id}"><span>上传图片</span></label>
@@ -303,7 +307,7 @@
       } else if (node.type === 'gpt_image') {
         const model = d.model || 'gpt-image-2';
         const cfg = AI_IMAGE_MODEL_CFG[model] || AI_IMAGE_MODEL_CFG['gpt-image-2'];
-        const thumb = d.image_url ? `<img src="${d.image_url}" />` : `<span class="gen-thumb-empty">?</span>`;
+        const thumb = d.image_url ? `<img src="${d.image_url}" onclick="openLightbox('${d.image_url}')" style="cursor:pointer" />` : `<span class="gen-thumb-empty">?</span>`;
         const prompt = d.prompt || getDefaultImagePrompt();
         const isGptImage2 = model === 'gpt-image-2';
         const size = d.size || d.resolution || cfg.defaultSize || '1024x1024';
@@ -324,7 +328,7 @@
         const refSlot = (field, label) => `
           <div style="flex:1">
             <div class="node-label">${label}</div>
-            <div class="ref-upload" onclick="document.getElementById('upload-${field}-${node.id}').click()">
+            <div class="ref-upload" ${d[field] ? `onclick="event.stopPropagation();openLightbox('${d[field]}')"` : `onclick="document.getElementById('upload-${field}-${node.id}').click()"`}>
               ${d[field] ? `<img src="${d[field]}" />` : `<span class="ref-upload-empty">+ 上传</span>`}
             </div>
             <input id="upload-${field}-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadRefImage('${node.id}','${field}',this)" />
@@ -366,11 +370,11 @@
           ${refSlotsHtml}`;
       } else if (node.type === 'mask_edit') {
         if (d.mask_url) {
-          html += `<div class="node-preview"><div class="checkerboard"></div><img src="${d.mask_url}" /></div>`;
+          html += `<div class="node-preview" onclick="openLightbox('${d.mask_url}')"><div class="checkerboard"></div><img src="${d.mask_url}" /></div>`;
         }
         html += `<div style="font-size:11px;color:var(--c-mask_edit);padding:4px 6px;background:rgba(236,72,153,0.06);border-radius:5px;text-align:center;">双击编辑遮罩</div>`;
       } else if (node.type === 'seedance_video') {
-        const thumb = d.image_url ? `<img src="${d.image_url}" />` : `<span class="gen-thumb-empty">?</span>`;
+        const thumb = d.video_url ? `<video src="${d.video_url}" muted loop class="gen-thumb-video" onclick="event.stopPropagation();openLightbox('${d.video_url}',true)"></video>` : d.image_url ? `<img src="${d.image_url}" onclick="openLightbox('${d.image_url}')" style="cursor:pointer" />` : `<span class="gen-thumb-empty">?</span>`;
         const prompt = d.prompt || getDefaultVideoPrompt();
         html += `
           <div class="gen-prompt-box">
@@ -746,6 +750,7 @@
         if (e.shiftKey) { toggleNodeBoxSelection(node.id); return; }
         selectedNode = node.id;
         clearBoxSelection();
+        updateRunSelectedBtn();
         document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
         el.classList.add('selected', 'dragging');
         const sx = e.clientX, sy = e.clientY, ox = node.x, oy = node.y;
@@ -786,6 +791,7 @@
         if (e.shiftKey) { e.stopPropagation(); e.preventDefault(); toggleNodeBoxSelection(node.id); return; }
         selectedNode = node.id;
         clearBoxSelection();
+        updateRunSelectedBtn();
         document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
         el.classList.add('selected');
       });
@@ -823,16 +829,26 @@
       const btn = document.getElementById('btn-run-selected');
       if (!btn) return;
       const n = selectedNodes.size;
-      btn.textContent = `运行选中 (${n})`;
-      btn.disabled = n === 0;
+      if (n > 0) {
+        btn.textContent = `运行选中 (${n})`;
+        btn.disabled = false;
+      } else if (selectedNode) {
+        btn.textContent = '运行当前链路';
+        btn.disabled = false;
+      } else {
+        btn.textContent = '运行选中 (0)';
+        btn.disabled = true;
+      }
     }
 
     function runSelected() {
-      if (selectedNodes.size === 0) {
-        alert('请先 Shift+拖动框选 或 Shift+点击节点 选择要运行的部分');
-        return;
+      if (selectedNodes.size > 0) {
+        runCanvas([...selectedNodes]);
+      } else if (selectedNode) {
+        runCanvas([...getChainNodeIds(selectedNode)]);
+      } else {
+        alert('请先选择节点（单击选中运行链路，或 Shift+框选运行部分）');
       }
-      runCanvas([...selectedNodes]);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -889,6 +905,7 @@
         clearBoxSelection();
         selectedNode = null; selectedConn = null;
         document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
+        updateRunSelectedBtn();
         renderConnections();
       }
     });
@@ -1025,6 +1042,7 @@
         selectedNode = null; selectedConn = null;
         clearBoxSelection();
         document.querySelectorAll('.node.selected').forEach(n=>n.classList.remove('selected'));
+        updateRunSelectedBtn();
         renderConnections();
       }
     });
@@ -1076,16 +1094,22 @@
     }
     function stopPolling(nodeId) { if (pollTimers[nodeId]) { clearInterval(pollTimers[nodeId]); delete pollTimers[nodeId]; renderConnections(); } }
     function updateNodeUI(nodeId, d) {
-      nodeRuntime[nodeId] = { status: d.status, progress: d.progress, image_url: d.image_url };
+      nodeRuntime[nodeId] = { status: d.status, progress: d.progress, image_url: d.image_url, video_url: d.video_url, mask_url: d.mask_url };
       const badge = document.getElementById('badge-'+nodeId);
       if (badge) { badge.textContent = STATUS_LABELS[d.status]||d.status; badge.className = 'node-badge '+d.status; }
       const prog = document.getElementById('prog-'+nodeId);
       if (prog) { prog.style.width = d.progress+'%'; prog.className = 'fill '+d.status; }
-      if (d.image_url) {
-        const node = canvasData.nodes.find(n=>n.id===nodeId);
-        if (node && node.data.image_url !== d.image_url) { node.data.image_url = d.image_url; refreshNodePreview(nodeId); }
+      const node = canvasData.nodes.find(n=>n.id===nodeId);
+      if (node) {
+        let changed = false;
+        if (d.image_url && node.data.image_url !== d.image_url) { node.data.image_url = d.image_url; changed = true; }
+        if (d.video_url && node.data.video_url !== d.video_url) { node.data.video_url = d.video_url; changed = true; }
+        if (d.mask_url && node.data.mask_url !== d.mask_url) { node.data.mask_url = d.mask_url; changed = true; }
+        if (d.width) { node.data._width = d.width; changed = true; }
+        if (d.height) { node.data._height = d.height; changed = true; }
+        if (changed) refreshNodePreview(nodeId);
       }
-      if (d.error) { const node = canvasData.nodes.find(n=>n.id===nodeId); if(node) { node.data._error = d.error; refreshNodePreview(nodeId); } }
+      if (d.error) { const node2 = canvasData.nodes.find(n=>n.id===nodeId); if(node2) { node2.data._error = d.error; refreshNodePreview(nodeId); } }
     }
     function checkAllDone() {
       if (Object.keys(pollTimers).length === 0) {
@@ -1097,7 +1121,7 @@
     function getCompareOutputs() {
       return canvasData.nodes.filter(n => {
         const rt = nodeRuntime[n.id];
-        return rt && rt.status === 'success' && rt.image_url;
+        return rt && rt.status === 'success' && (rt.image_url || rt.video_url);
       });
     }
     function showCompare() {
@@ -1109,8 +1133,8 @@
         grid.innerHTML = outputs.map(n => {
           const cfg = NODE_CFG[n.type] || { title: n.type, color: '#555' };
           const rt = nodeRuntime[n.id];
-          const url = rt ? rt.image_url : n.data.image_url;
-          const isVideo = n.type === 'seedance_video';
+          const url = (rt && rt.video_url) ? rt.video_url : (rt ? rt.image_url : null) || n.data.video_url || n.data.image_url;
+          const isVideo = !!(rt && rt.video_url) || !!(n.data && n.data.video_url);
           const media = isVideo ? `<video src="${url}" muted></video>` : `<img src="${url}" />`;
           return `<div class="compare-card" onclick="openLightbox('${url}', ${isVideo})">
             ${media}

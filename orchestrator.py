@@ -26,6 +26,22 @@ from storage import storage
 
 logger = logging.getLogger("orchestrator")
 
+
+async def _record_image_size(canvas_id: str, node_id: str, image_url: str) -> None:
+    """读取图片实际尺寸并写入 registry（用于前端显示和 size 参数验证）"""
+    try:
+        from PIL import Image as PILImage
+        path = storage.url_to_path(image_url)
+        loop = asyncio.get_running_loop()
+        def _read_size():
+            with PILImage.open(path) as img:
+                return img.size  # (width, height)
+        width, height = await loop.run_in_executor(None, _read_size)
+        registry.update(f"{canvas_id}:{node_id}", width=width, height=height)
+    except Exception:
+        pass  # 尺寸读取失败不影响主流程
+
+
 # 并发闸：最多 3 个节点同时执行
 SEM = asyncio.Semaphore(3)
 
@@ -476,10 +492,12 @@ def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
             downstream_node = ctx["node_map"].get(downstream, {})
             downstream_data = downstream_node.get("data", {})
             changed = False
-            # 注入图片
-            if upstream_rec.get("image_url") and not downstream_data.get("image_url"):
-                downstream_data["image_url"] = upstream_rec["image_url"]
-                changed = True
+            # 注入图片：下游为空时注入；seedance_video 允许上游覆盖
+            if upstream_rec.get("image_url"):
+                downstream_type = downstream_node.get("type", "")
+                if not downstream_data.get("image_url") or downstream_type == "seedance_video":
+                    downstream_data["image_url"] = upstream_rec["image_url"]
+                    changed = True
             # 注入视频
             if upstream_rec.get("video_url") and not downstream_data.get("video_url"):
                 downstream_data["video_url"] = upstream_rec["video_url"]
@@ -504,6 +522,7 @@ async def exec_image_input(canvas_id: str, node_id: str, params: dict) -> None:
     if not url:
         raise ValueError("image_input 节点未上传图片")
     registry.update(f"{canvas_id}:{node_id}", progress=50, image_url=url)
+    await _record_image_size(canvas_id, node_id, url)
     await asyncio.sleep(0.1)  # 让 UI 有时间渲染
     registry.update(f"{canvas_id}:{node_id}", progress=100)
 
@@ -581,6 +600,7 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
 
     url = await storage.save(png_bytes, "png")
     registry.update(f"{canvas_id}:{node_id}", progress=95, image_url=url)
+    await _record_image_size(canvas_id, node_id, url)
 
 
 async def _exec_gpt_image_sync(
@@ -630,6 +650,7 @@ async def _exec_gpt_image_sync(
 
     url = await storage.save(png_bytes, "png")
     registry.update(f"{canvas_id}:{node_id}", progress=90, image_url=url)
+    await _record_image_size(canvas_id, node_id, url)
 
 
 async def exec_remove_bg(canvas_id: str, node_id: str, params: dict) -> None:
@@ -697,6 +718,7 @@ async def exec_remove_bg(canvas_id: str, node_id: str, params: dict) -> None:
                         png_bytes = dl.content
                     out_url = await storage.save(png_bytes, "png")
                     registry.update(f"{canvas_id}:{node_id}", progress=95, image_url=out_url)
+                    await _record_image_size(canvas_id, node_id, out_url)
                     return
             raise RuntimeError(f"RH 抠图成功但无图片结果: {result}")
 
@@ -786,6 +808,7 @@ async def exec_mask_edit(canvas_id: str, node_id: str, params: dict) -> None:
     if not mask_url:
         raise ValueError("mask_edit 节点未绘制遮罩（请双击节点编辑遮罩）")
     registry.update(f"{canvas_id}:{node_id}", progress=50, image_url=ref_url, mask_url=mask_url)
+    await _record_image_size(canvas_id, node_id, ref_url)
     await asyncio.sleep(0.1)
     registry.update(f"{canvas_id}:{node_id}", progress=100)
 

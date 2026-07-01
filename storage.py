@@ -17,6 +17,14 @@ class StorageBackend(Protocol):
         """保存数据，返回可访问 URL"""
         ...
 
+    def url_to_path(self, url: str) -> str:
+        """将 URL（如 /assets/2026/06/abc.png）转回本地文件路径。"""
+        if url.startswith(self.base_url):
+            rel = url[len(self.base_url):].lstrip("/")
+            return os.path.join(self.root, rel.replace("/", os.sep))
+        # 非 /assets 前缀的 URL 尝试直接作为路径返回
+        return url
+
     async def download(self, url: str) -> bytes:
         """拉取远程 URL 内容本地化（用于 seedance 视频 24h 过期前下载保存）"""
         ...
