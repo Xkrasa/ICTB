@@ -354,6 +354,9 @@
     .ref-upload:hover { border-color: var(--c-gpt_image); }
     .ref-upload img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .ref-upload-empty { font-size: 11px; color: #666; }
+    .ref-clear { position: absolute; top: 18px; right: 2px; background: rgba(239,68,68,0.85); color: #fff; border: none; border-radius: 50%; width: 16px; height: 16px; font-size: 10px; line-height: 16px; text-align: center; cursor: pointer; padding: 0; z-index: 2; opacity: 0; transition: opacity 0.15s; }
+    .ref-clear:hover { opacity: 1; }
+    div:hover > .ref-clear { opacity: 1; }
 
     /* ═══════════ 右键菜单 ═══════════ */
     #context-menu {

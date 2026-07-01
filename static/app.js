@@ -31,6 +31,7 @@
     const pollTimers = {};
     const nodeElements = {};
     let nodeRuntime = {};  // {nodeId: {status, progress, image_url}} 运行态，不持久化
+    let clipboardGraph = null;  // {nodes: [...], connections: [...]} 复制粘贴剪贴板
 
     let viewX = 100, viewY = 70, viewScale = 1;
     let isPanning = false, panStart = null;
@@ -302,7 +303,10 @@
         html += `<div class="node-dim">${d._width} x ${d._height}</div>`;
       }
       if (node.type === 'image_input') {
-        html += `<label class="upload-btn" for="upload-${node.id}"><span>上传图片</span></label>
+        html += `<div style="display:flex;gap:4px;align-items:center">
+          <label class="upload-btn" for="upload-${node.id}"><span>上传图片</span></label>
+          ${d.image_url ? `<button class="ref-clear" onclick="clearNodeField('${node.id}','image_url')">清除</button>` : ''}
+        </div>
           <input id="upload-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadImage('${node.id}',this)" />`;
       } else if (node.type === 'gpt_image') {
         const model = d.model || 'gpt-image-2';
@@ -326,20 +330,21 @@
           `<option value="${a}" ${a===ar?'selected':''}>${a}</option>`
         ).join('');
         const refSlot = (field, label) => `
-          <div style="flex:1">
+          <div style="flex:1;position:relative">
             <div class="node-label">${label}</div>
             <div class="ref-upload" ${d[field] ? `onclick="event.stopPropagation();openLightbox('${d[field]}')"` : `onclick="document.getElementById('upload-${field}-${node.id}').click()"`}>
               ${d[field] ? `<img src="${d[field]}" />` : `<span class="ref-upload-empty">+ 上传</span>`}
             </div>
+            ${d[field] ? `<button class="ref-clear" onclick="event.stopPropagation();clearNodeField('${node.id}','${field}')">&times;</button>` : ''}
             <input id="upload-${field}-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadRefImage('${node.id}','${field}',this)" />
           </div>`;
         let refSlotsHtml = '';
         if (model === 'gpt-image-2') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('hair_url','发型（可选图片）')}${refSlot('clothing_url','服装（可选图片）')}</div>`;
+          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('hair_url','参考图2 · 发型')}${refSlot('clothing_url','参考图3 · 服装')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">图1=主体图（来自上游），按顺序传入</div>`;
         } else if (model === 'rh_gpt_image_i2i') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2（可选）')}</div>`;
+          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2')}</div>`;
         } else if (model === 'nano_banana_2') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2（可选）')}${refSlot('image3_url','参考图3（可选）')}${refSlot('image4_url','参考图4（可选）')}</div>`;
+          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2')}${refSlot('image3_url','参考图3')}${refSlot('image4_url','参考图4')}</div>`;
         }
         html += `
           <div class="gen-prompt-box">
@@ -526,6 +531,13 @@
         if (node) { node.data[field] = d.url; refreshNodePreview(nodeId); autoSave(); }
       } catch(e) { alert('上传失败: '+e.message); }
       input.value = '';
+    }
+    function clearNodeField(nodeId, field) {
+      const node = canvasData.nodes.find(n => n.id === nodeId);
+      if (!node) return;
+      node.data[field] = '';
+      refreshNodePreview(nodeId);
+      autoSave();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -886,6 +898,68 @@
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
         e.preventDefault();
         redo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && !e.shiftKey) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        e.preventDefault();
+        // 复制：优先框选节点，否则单选节点所在链路
+        let srcNodes;
+        if (selectedNodes.size > 0) {
+          srcNodes = canvasData.nodes.filter(n => selectedNodes.has(n.id));
+        } else if (selectedNode) {
+          const chainIds = getChainNodeIds(selectedNode);
+          srcNodes = canvasData.nodes.filter(n => chainIds.has(n.id));
+        } else {
+          return;
+        }
+        const idSet = new Set(srcNodes.map(n => n.id));
+        const srcConns = canvasData.connections.filter(c => idSet.has(c.from) && idSet.has(c.to));
+        clipboardGraph = { nodes: JSON.parse(JSON.stringify(srcNodes)), connections: JSON.parse(JSON.stringify(srcConns)) };
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V') && !e.shiftKey) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        e.preventDefault();
+        if (!clipboardGraph || clipboardGraph.nodes.length === 0) return;
+        pushHistory();
+        const idMap = {};
+        const offsetX = 40, offsetY = 40;
+        // 先清除运行态数据，生成新 id
+        for (const old of clipboardGraph.nodes) {
+          const newId = uid();
+          idMap[old.id] = newId;
+          const newNode = {
+            id: newId,
+            type: old.type,
+            x: old.x + offsetX,
+            y: old.y + offsetY,
+            data: JSON.parse(JSON.stringify(old.data))
+          };
+          delete newNode.data._error;
+          delete newNode.data._width;
+          delete newNode.data._height;
+          canvasData.nodes.push(newNode);
+          renderNode(newNode);
+        }
+        // 复制内部连线
+        for (const c of clipboardGraph.connections) {
+          if (idMap[c.from] && idMap[c.to]) {
+            canvasData.connections.push({ id: uid(), from: idMap[c.from], to: idMap[c.to] });
+          }
+        }
+        // 选中新复制的节点
+        clearBoxSelection();
+        if (selectedNode) { selectedNode = null; document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected')); }
+        for (const old of clipboardGraph.nodes) {
+          const newId = idMap[old.id];
+          selectedNodes.add(newId);
+          nodeElements[newId]?.classList.add('box-selected');
+        }
+        updateRunSelectedBtn();
+        renderConnections();
+        updateStatusbar();
+        autoSave();
         return;
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
