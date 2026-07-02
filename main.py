@@ -103,8 +103,10 @@ class ConnectionData(BaseModel):
 
 
 class CanvasRunRequest(BaseModel):
+    canvas_id: str = ""          # 画布定义 ID（前端传入，固定不变；空则自动生成）
     nodes: list[NodeData]
     connections: list[ConnectionData]
+    run_node_ids: list[str] = [] # 本次要运行的节点 ID（空=运行全部）
 
 
 # ───────────────────────── 路由 ─────────────────────────
@@ -174,11 +176,15 @@ async def upload_asset(file: UploadFile = File(...)):
 
 @app.post("/api/canvas/run")
 async def canvas_run(req: CanvasRunRequest):
-    """执行画布：接收节点和连线，启动 DAG 级联执行"""
-    canvas_id = uuid.uuid4().hex
+    """执行画布：接收节点和连线，启动 DAG 级联执行。
+    canvas_id 为画布定义 ID（固定不变），未传则自动生成（兼容不保存直接运行）。
+    run_node_ids 指定本次只运行的节点子集，其余节点保留历史产物。
+    """
+    canvas_id = req.canvas_id or uuid.uuid4().hex[:8]
     nodes = [n.model_dump() for n in req.nodes]
     conns = [{"id": c.id, "from": c.from_node, "to": c.to} for c in req.connections]
-    node_statuses = orchestrator.execute_canvas(canvas_id, nodes, conns)
+    run_node_ids = req.run_node_ids or None
+    node_statuses = orchestrator.execute_canvas(canvas_id, nodes, conns, run_node_ids=run_node_ids)
     return {"canvas_id": canvas_id, "node_statuses": node_statuses}
 
 

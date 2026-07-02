@@ -340,6 +340,63 @@ _STAGE_EXECUTORS: dict = {
 
 # ═════════════════════════ Phase 2: DAG 画布编排 ═════════════════════════
 
+def _restore_from_node_data(rec: dict, node: dict) -> None:
+    """从画布节点的 node.data 恢复历史产物到 registry 记录。
+
+    当 registry 中无旧记录（首次运行/重启丢失）时，用前端 autoSave
+    持久化在 node.data 里的产物 URL 恢复，使级联注入能正常工作。
+    """
+    data = node.get("data", {})
+    has_output = False
+    for field in ("image_url", "video_url", "mask_url"):
+        url = data.get(field)
+        if url and not rec.get(field):
+            rec[field] = url
+            has_output = True
+    if has_output:
+        rec["status"] = "success"
+        rec["progress"] = 100
+
+
+def _inject_upstream_to_downstreams(
+    canvas_id: str, upstream_id: str, upstream_rec: dict,
+    node_map: dict, adj: dict
+) -> None:
+    """模拟一个不在 run_set 内的上游节点"已完成"：
+    将其产物注入所有下游的 node.data，并减少下游的 remaining 计数。
+
+    与 _schedule_cascade(success=True) 功能相同，但用于重跑子集时
+    不在本次运行范围内的上游节点——它们的产物已存在 registry 中，
+    只需把产物传递给下游并减少入度，不实际执行节点。
+    """
+    ctx = _canvas_contexts.get(canvas_id)
+    if ctx is None:
+        return
+
+    _OVERRIDABLE = {"gpt_image", "remove_bg", "mask_edit", "seedance_video"}
+    for downstream in adj.get(upstream_id, []):
+        downstream_node = node_map.get(downstream, {})
+        downstream_data = downstream_node.get("data", {})
+        changed = False
+
+        if upstream_rec.get("image_url"):
+            downstream_type = downstream_node.get("type", "")
+            if not downstream_data.get("image_url") or downstream_type in _OVERRIDABLE:
+                downstream_data["image_url"] = upstream_rec["image_url"]
+                changed = True
+        if upstream_rec.get("video_url") and not downstream_data.get("video_url"):
+            downstream_data["video_url"] = upstream_rec["video_url"]
+            changed = True
+        if upstream_rec.get("mask_url"):
+            downstream_data["mask_url"] = upstream_rec["mask_url"]
+            changed = True
+
+        if changed:
+            downstream_node["data"] = downstream_data
+
+        ctx["remaining"][downstream] -= 1
+
+
 def _new_node_record(canvas_id: str, node_id: str, node_type: str) -> dict:
     now = time.time()
     return {
@@ -359,12 +416,17 @@ def _new_node_record(canvas_id: str, node_id: str, node_type: str) -> dict:
     }
 
 
-def execute_canvas(canvas_id: str, nodes: list, connections: list) -> dict:
+def execute_canvas(canvas_id: str, nodes: list, connections: list, run_node_ids: list | None = None) -> dict:
     """解析 DAG 并启动入度为 0 的节点，返回 {node_id: status} 映射。
 
     级联执行：上游 success → 自动触发下游；上游 failed → 下游标记 blocked。
+
+    run_node_ids: 本次要运行的节点 ID 列表。
+    - 列表内的节点：创建新记录（重置状态），会重新执行。
+    - 列表外的节点：保留 registry 旧记录（含历史产物），供级联注入。
+    - 为 None 或空：运行全部节点（向后兼容）。
     """
-    logger.info("execute_canvas %s nodes=%d", canvas_id, len(nodes))
+    logger.info("execute_canvas %s nodes=%d run_node_ids=%s", canvas_id, len(nodes), run_node_ids)
     node_map = {n["id"]: n for n in nodes}
 
     # 构建 DAG
@@ -375,12 +437,35 @@ def execute_canvas(canvas_id: str, nodes: list, connections: list) -> dict:
         adj[src].append(dst)
         in_degree[dst] += 1
 
-    # 注册所有节点
+    # 注册节点：区分「本次运行」与「保留历史」
+    run_set = set(run_node_ids) if run_node_ids else set(node_map.keys())
     for nid, node in node_map.items():
-        registry.set(
-            f"{canvas_id}:{nid}",
-            _new_node_record(canvas_id, nid, node.get("type", "unknown")),
-        )
+        key = f"{canvas_id}:{nid}"
+        if nid in run_set:
+            # 本次要运行的节点：创建新记录（重置状态，清空产物）
+            registry.set(key, _new_node_record(canvas_id, nid, node.get("type", "unknown")))
+        else:
+            # 不在本次运行集合中的节点：保留旧记录（含历史产物）
+            rec = registry.get(key)
+            if rec is not None:
+                # 旧记录存在：保留产物
+                rec["task_id"] = None
+                rec["error"] = None
+                rec["progress"] = 0
+                # 有产物的节点保持 success 状态（供级联注入和 _inject_upstream_to_downstreams 使用）
+                has_output = rec.get("image_url") or rec.get("video_url") or rec.get("mask_url")
+                if has_output:
+                    rec["status"] = "success"
+                    rec["progress"] = 100
+                else:
+                    rec["status"] = "idle"
+                    # 旧记录无产物：尝试从 node.data 恢复
+                    _restore_from_node_data(rec, node)
+            else:
+                # 旧记录不存在（首次/重启丢失）：从 node.data 恢复产物
+                rec = _new_node_record(canvas_id, nid, node.get("type", "unknown"))
+                _restore_from_node_data(rec, node)
+                registry.set(key, rec)
 
     # 存储画布上下文（供级联回调使用）
     _canvas_contexts[canvas_id] = {
@@ -390,9 +475,18 @@ def execute_canvas(canvas_id: str, nodes: list, connections: list) -> dict:
         "remaining": dict(in_degree),
     }
 
-    # 启动入度为 0 的节点
+    # 对不在 run_set 中的上游节点，模拟"已完成"：
+    # 减少下游 remaining + 注入历史产物到下游 node.data
     for nid in node_map:
-        if in_degree[nid] == 0:
+        if nid in run_set:
+            continue
+        rec = registry.get(f"{canvas_id}:{nid}")
+        if rec and rec.get("status") == "success":
+            _inject_upstream_to_downstreams(canvas_id, nid, rec, node_map, adj)
+
+    # 启动 run_set 内 remaining 已归零的节点
+    for nid in run_set:
+        if _canvas_contexts[canvas_id]["remaining"][nid] == 0:
             _start_node(canvas_id, nid)
 
     return {nid: registry.get(f"{canvas_id}:{nid}")["status"] for nid in node_map}
@@ -492,10 +586,12 @@ def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
             downstream_node = ctx["node_map"].get(downstream, {})
             downstream_data = downstream_node.get("data", {})
             changed = False
-            # 注入图片：下游为空时注入；seedance_video 允许上游覆盖
+            # 注入图片：下游为空时注入；
+            # 对链路型节点（重新跑上游时应被新 AI 图覆盖，而非沿用旧值）
+            _OVERRIDABLE = {"gpt_image", "remove_bg", "mask_edit", "seedance_video"}
             if upstream_rec.get("image_url"):
                 downstream_type = downstream_node.get("type", "")
-                if not downstream_data.get("image_url") or downstream_type == "seedance_video":
+                if not downstream_data.get("image_url") or downstream_type in _OVERRIDABLE:
                     downstream_data["image_url"] = upstream_rec["image_url"]
                     changed = True
             # 注入视频
@@ -537,7 +633,7 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
     model = params.get("model", "gpt-image-2")
     logger.info("exec_gpt_image model=%s", model)
     ref_url = params.get("image_url")
-    if not ref_url and model != "rh_gpt_image_i2i":
+    if not ref_url and model not in ("rh_gpt_image_i2i", "gpt-image-2"):
         raise ValueError("gpt_image 节点缺少输入图片（请连线 image_input 或上游节点）")
 
     prompt = params.get("prompt", "")
@@ -619,9 +715,9 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
 
 
 async def _exec_gpt_image_sync(
-    canvas_id: str, node_id: str, params: dict, ref_url: str
+    canvas_id: str, node_id: str, params: dict, ref_url: str | None
 ) -> None:
-    """gpt-image-2 同步渠道执行逻辑（mask / hair / clothing / edit）。"""
+    """gpt-image-2 同步渠道执行逻辑（generations / mask / hair / clothing / edit）。"""
     prompt = params.get("prompt", "")
     hair_url = params.get("hair_url")
     makeup = params.get("makeup", "")
@@ -630,6 +726,19 @@ async def _exec_gpt_image_sync(
     size = params.get("size") or params.get("resolution") or config.GPT_IMAGE_SIZE
 
     registry.update(f"{canvas_id}:{node_id}", progress=15)
+
+    # 无参考图 → 文生图（/images/generations）
+    if not ref_url:
+        registry.update(f"{canvas_id}:{node_id}", progress=25)
+        png_bytes = await gpt_image.generate_image(
+            prompt or "生成高质量商业海报图像，画面精致，细节丰富。",
+            size=size,
+        )
+        url = await storage.save(png_bytes, "png")
+        registry.update(f"{canvas_id}:{node_id}", progress=90, image_url=url)
+        await _record_image_size(canvas_id, node_id, url)
+        return
+
     ref_bytes = await storage.download(ref_url)
 
     # 下载遮罩（如果有）
@@ -657,9 +766,10 @@ async def _exec_gpt_image_sync(
             ref_bytes, hair_bytes, makeup, clothing_bytes, size=size
         )
     else:
+        # 有参考图走 edits，用用户 prompt（非弱默认值）
         png_bytes = await gpt_image.edit_image(
             ref_bytes,
-            prompt or "保持人物特征，优化画面质量",
+            prompt or "基于参考图生成高质量图像，保持人物特征，画面精致。",
             size=size,
         )
 
@@ -758,37 +868,58 @@ async def exec_remove_bg(canvas_id: str, node_id: str, params: dict) -> None:
 async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> None:
     """视频生成节点：RunningHub seedance 图生视频。
 
-    流程：下载本地图片 → 上传到 RunningHub → 提交图生视频 → 轮询 → 下载转存。
+    支持三种渠道：
+    - first_last_frame（首尾帧）：首帧必填，尾帧可选，走 RH AI App 工作流，
+      支持首帧→尾帧过渡动画，可自定义时长/比例/分辨率。
+    - official（官方稳定版）：仅首帧，走 seedance 原生 API，4/8/12s。
+    - low_cost（低价版）：仅首帧，走 seedance 原生 API，10/15s。
     """
     if not config.RUNNINGHUB_API_KEY:
         raise ValueError("未配置 RUNNINGHUB_API_KEY，请在 .env 中设置")
 
     ref_url = params.get("image_url")
     if not ref_url:
-        raise ValueError("seedance_video 节点缺少输入图片")
+        raise ValueError("seedance_video 节点缺少输入图片（首帧）")
     prompt = params.get("prompt", "")
     if len(prompt) < 5:
-        prompt = "基于原图生成10秒动态视频，人物自然微笑，缓慢转头。"
+        prompt = "基于原图生成动态视频，人物自然微笑，缓慢转头。"
     duration = params.get("duration", "8")
     aspect_ratio = params.get("aspect_ratio", "9:16")
+    channel = params.get("channel", "official")
 
-    # 1. 下载本地图片
+    # ── 首尾帧模式 ──
+    if channel == "first_last_frame":
+        registry.update(f"{canvas_id}:{node_id}", progress=5)
+        ref_bytes = await storage.download(ref_url)
+        last_url = params.get("image2_url")
+        last_bytes = await storage.download(last_url) if last_url else None
+        registry.update(f"{canvas_id}:{node_id}", progress=10)
+        resolution = params.get("resolution", "480p")
+        video_bytes = await rh_image.seedance_first_last_frame(
+            ref_bytes, last_bytes, prompt,
+            duration=duration, aspect_ratio=aspect_ratio, resolution=resolution,
+            on_progress=_rh_progress_cb(canvas_id, node_id),
+            on_submitted=lambda tid: registry.update(
+                f"{canvas_id}:{node_id}", external_task_id=tid
+            ),
+        )
+        url = await storage.save(video_bytes, "mp4")
+        registry.update(f"{canvas_id}:{node_id}", progress=95, video_url=url)
+        return
+
+    # ── 官方/低价版模式（原逻辑） ──
     registry.update(f"{canvas_id}:{node_id}", progress=5)
     ref_bytes = await storage.download(ref_url)
 
-    # 2. 上传到 RunningHub（获取可访问的 URL）
     registry.update(f"{canvas_id}:{node_id}", progress=10)
     rh_image_url = await runninghub.upload_image(ref_bytes)
 
-    # 3. 提交图生视频任务
     registry.update(f"{canvas_id}:{node_id}", progress=15)
     task_id = await runninghub.image_to_video(
         rh_image_url, prompt, duration, aspect_ratio
     )
 
-    # 4. 轮询任务状态（带进度回调）
     def on_progress(status: str) -> None:
-        # QUEUED → 20%, RUNNING → 30-80%
         if status == "QUEUED":
             registry.update(f"{canvas_id}:{node_id}", progress=20)
         elif status == "RUNNING":
@@ -799,7 +930,6 @@ async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> Non
     registry.update(f"{canvas_id}:{node_id}", progress=20)
     video_url = await runninghub.wait_for_result(task_id, on_progress)
 
-    # 5. 下载视频并转存（RunningHub URL 24h 过期）
     registry.update(f"{canvas_id}:{node_id}", progress=85)
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.get(video_url)

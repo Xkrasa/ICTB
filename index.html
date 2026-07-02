@@ -63,8 +63,8 @@
     <button class="tb-btn" id="btn-undo" onclick="undo()" title="撤销 (Ctrl+Z)" disabled>撤销</button>
     <button class="tb-btn" id="btn-redo" onclick="redo()" title="重做 (Ctrl+Y)" disabled>重做</button>
     <button class="tb-btn" onclick="showCompare()" title="对比运行结果">对比</button>
-    <button class="tb-btn" onclick="runChain()" title="运行选中节点所在链路">运行链路</button>
-    <button class="tb-btn" id="btn-run-selected" onclick="runSelected()" title="运行框选节点 (Shift+拖动框选 / Shift+点节点)" disabled>运行选中 (0)</button>
+    <button class="tb-btn" onclick="runChain()" title="从链路源头开始级联运行（会重跑上游）">运行链路</button>
+    <button class="tb-btn" id="btn-run-selected" onclick="runSelected()" title="只运行选中节点，要求所有上游必须先成功" disabled>运行选中 (0)</button>
     <button class="tb-btn primary" onclick="runCanvas()">▶ 运行全部</button>
   </div>
 

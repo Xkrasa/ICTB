@@ -27,7 +27,8 @@
     let canvasData = { nodes: [], connections: [] };
     let selectedNode = null, selectedConn = null;
     let selectedNodes = new Set();  // Shift+框选/点选的多选集合（区别于单选 selectedNode）
-    let currentCanvasId = null;
+    let currentCanvasId = null;   // 运行实例 ID（后端 /api/canvas/run 返回）
+    let activeCanvasId = null;    // 画布定义 ID（loadCanvas 时设置，固定不变）
     const pollTimers = {};
     const nodeElements = {};
     let nodeRuntime = {};  // {nodeId: {status, progress, image_url}} 运行态，不持久化
@@ -149,7 +150,7 @@
         case 'gpt_image': return { prompt:'', hair_url:'', makeup:'', clothing_url:'', model:'gpt-image-2', size:'1024x1024', image2_url:'', image3_url:'', image4_url:'' };
         case 'remove_bg': return {};
         case 'mask_edit': return { mask_url: null };
-        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16', channel:'official' };
+        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16', channel:'official', image_url:'', image2_url:'', resolution:'480p' };
         default: return {};
       }
     }
@@ -203,7 +204,7 @@
       canvasData = { nodes: [], connections: [] };
       Object.values(nodeElements).forEach(el => el.remove());
       Object.keys(nodeElements).forEach(k => delete nodeElements[k]);
-      selectedNode = null; currentCanvasId = null;
+      selectedNode = null; currentCanvasId = null; activeCanvasId = null;
       clearBoxSelection();
       renderConnections(); updateStatusbar();
       localStorage.removeItem('autosave');
@@ -220,6 +221,25 @@
         }
       }
       return chain;
+    }
+    function getUpstreamNodeIds(nodeId) {
+      return canvasData.connections.filter(c => c.to === nodeId).map(c => c.from);
+    }
+    function findBlockingUpstreams(nodeIds) {
+      const blocking = [];
+      const checked = new Set();
+      for (const nid of nodeIds) {
+        for (const uid of getUpstreamNodeIds(nid)) {
+          if (checked.has(uid)) continue;
+          checked.add(uid);
+          const rt = nodeRuntime[uid];
+          if (!rt || rt.status !== 'success') {
+            const n = canvasData.nodes.find(x => x.id === uid);
+            blocking.push({ id: uid, title: n ? (NODE_CFG[n.type]?.title || n.type) : uid });
+          }
+        }
+      }
+      return blocking;
     }
     function cloneChain() {
       if (!selectedNode) { alert('请先选中一条链路中的任意节点'); return; }
@@ -338,13 +358,31 @@
             ${d[field] ? `<button class="ref-clear" onclick="event.stopPropagation();clearNodeField('${node.id}','${field}')">&times;</button>` : ''}
             <input id="upload-${field}-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadRefImage('${node.id}','${field}',this)" />
           </div>`;
+        // 图1·主体图：只读，来自上游连线产出（不随自身运行结果变化）
+        const refSlotReadOnly = (url, label) => `
+          <div style="flex:1;position:relative;${url?'':'opacity:0.55'}">
+            <div class="node-label">${label}</div>
+            <div class="ref-upload" ${url ? `onclick="event.stopPropagation();openLightbox('${url}')"` : ''}>
+              ${url ? `<img src="${url}" />` : `<span class="ref-upload-empty">来自上游</span>`}
+            </div>
+          </div>`;
+        const upConn = canvasData.connections.find(c => c.to === node.id);
+        let img1Url = '';
+        if (upConn) {
+          const up = canvasData.nodes.find(n => n.id === upConn.from);
+          if (up) { const rt = nodeRuntime[up.id]; img1Url = (rt && rt.image_url) || up.data.image_url || ''; }
+        }
+        if (!img1Url) img1Url = d.image_url || '';
+        const slot1 = refSlotReadOnly(img1Url, '图1 · 主体图');
         let refSlotsHtml = '';
         if (model === 'gpt-image-2') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('hair_url','参考图2 · 发型')}${refSlot('clothing_url','参考图3 · 服装')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">图1=主体图（来自上游），按顺序传入</div>`;
+          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${slot1}${refSlot('hair_url','图2 · 发型')}${refSlot('clothing_url','图3 · 服装')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">顺序：图1(上游) → 图2 → 图3</div>`;
         } else if (model === 'rh_gpt_image_i2i') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2（可选）')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">有主体图/参考图=图生图；无图=文生图</div>`;
+          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${slot1}${refSlot('image2_url','图2 · 参考图')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">有图1=图生图；图1空=文生图</div>`;
         } else if (model === 'nano_banana_2') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${refSlot('image2_url','参考图2')}${refSlot('image3_url','参考图3')}${refSlot('image4_url','参考图4')}</div>`;
+          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${slot1}${refSlot('image2_url','图2')}${refSlot('image3_url','图3')}${refSlot('image4_url','图4')}</div>`;
+        } else {
+          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${slot1}</div>`;
         }
         html += `
           <div class="gen-prompt-box">
@@ -374,13 +412,46 @@
           </div>
           ${refSlotsHtml}`;
       } else if (node.type === 'mask_edit') {
+        const maskUpstreams = canvasData.connections.filter(c => c.to === node.id).map(c => canvasData.nodes.find(n => n.id === c.from)).filter(Boolean);
+        const maskSrc = maskUpstreams[0];
+        const srcUrl = d.image_url || (maskSrc && (nodeRuntime[maskSrc.id]?.image_url || maskSrc.data.image_url));
+        if (srcUrl) {
+          html += `<div class="node-preview" onclick="openLightbox('${srcUrl}')"><div class="checkerboard"></div><img src="${srcUrl}" /></div>`;
+        }
         if (d.mask_url) {
           html += `<div class="node-preview" onclick="openLightbox('${d.mask_url}')"><div class="checkerboard"></div><img src="${d.mask_url}" /></div>`;
         }
+        if (maskUpstreams.length > 1) {
+          html += `<div style="font-size:10px;color:#F87171;padding:3px 5px;background:rgba(239,68,68,0.06);border-radius:4px;text-align:center;">注意：遮罩编辑只使用第一个上游输入，其余被忽略</div>`;
+        }
         html += `<div style="font-size:11px;color:var(--c-mask_edit);padding:4px 6px;background:rgba(236,72,153,0.06);border-radius:5px;text-align:center;">双击编辑遮罩</div>`;
+        if (maskSrc) {
+          html += `<div style="font-size:9px;color:#94A3B8;padding:2px 4px;text-align:center;">输入来源：${NODE_CFG[maskSrc.type]?.title || maskSrc.type}(${maskSrc.id.slice(0,6)})</div>`;
+        }
       } else if (node.type === 'seedance_video') {
         const thumb = d.video_url ? `<video src="${d.video_url}" muted loop class="gen-thumb-video" onclick="event.stopPropagation();openLightbox('${d.video_url}',true)"></video>` : d.image_url ? `<img src="${d.image_url}" onclick="openLightbox('${d.image_url}')" style="cursor:pointer" />` : `<span class="gen-thumb-empty">?</span>`;
         const prompt = d.prompt || getDefaultVideoPrompt();
+        const channel = d.channel || 'official';
+        const isFirstLast = channel === 'first_last_frame';
+        // 普通模式下，图1强制来自上游连线；首尾帧模式可手动上传或上游注入
+        const upstreams = canvasData.connections.filter(c => c.to === node.id).map(c => canvasData.nodes.find(n => n.id === c.from)).filter(Boolean);
+        const upstream1 = upstreams[0];
+        const upstreamLabel = (n) => n ? `${NODE_CFG[n.type]?.title || n.type}(${n.id.slice(0,6)})` : '无';
+        const frameSlot = (field, label, allowUpload) => `
+          <div style="flex:1;position:relative">
+            <div class="node-label">${label}</div>
+            <div class="ref-upload" ${d[field] ? `onclick="event.stopPropagation();openLightbox('${d[field]}')"` : (allowUpload ? `onclick="document.getElementById('upload-${field}-${node.id}').click()"` : '')}>
+              ${d[field] ? `<img src="${d[field]}" />` : `<span class="ref-upload-empty">${allowUpload ? '+ 上传' : '来自上游'}</span>`}
+            </div>
+            ${d[field] && allowUpload ? `<button class="ref-clear" onclick="event.stopPropagation();clearNodeField('${node.id}','${field}')">&times;</button>` : ''}
+            ${allowUpload ? `<input id="upload-${field}-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadRefImage('${node.id}','${field}',this)" />` : ''}
+          </div>`;
+        const firstSlot = isFirstLast
+          ? frameSlot('image_url', '图1 · 首帧', true)
+          : (upstream1
+              ? `<div style="flex:1;position:relative"><div class="node-label">图1 · 来自 ${upstreamLabel(upstream1)}</div><div class="ref-upload" onclick="event.stopPropagation();openLightbox('${d.image_url || upstream1.data.image_url}')"><img src="${d.image_url || upstream1.data.image_url || ''}" onerror="this.style.display='none'" /></div></div>`
+              : frameSlot('image_url', '图1 · 首帧（请连线上游）', false));
+        const lastSlot  = frameSlot('image2_url', '图2 · 尾帧（可选）', isFirstLast);
         html += `
           <div class="gen-prompt-box">
             <div class="gen-thumb">${thumb}</div>
@@ -391,23 +462,44 @@
           </div>
           <div class="gen-toolbar">
             <select class="gen-model" onchange="updateNodeData('${node.id}','channel',this.value)">
-              <option value="official">seedance（官方稳定版）</option>
-              <option value="low_cost">seedance（低价版）</option>
+              <option value="official" ${channel==='official'?'selected':''}>seedance（官方稳定版）</option>
+              <option value="low_cost" ${channel==='low_cost'?'selected':''}>seedance（低价版）</option>
+              <option value="first_last_frame" ${isFirstLast?'selected':''}>seedance（首尾帧）</option>
             </select>
             <select class="gen-ratio" onchange="updateNodeData('${node.id}','aspect_ratio',this.value)">
-              <option value="9:16" ${d.aspect_ratio!=='16:9'?'selected':''}>9:16 · 自适应</option>
-              <option value="16:9" ${d.aspect_ratio==='16:9'?'selected':''}>16:9 · 自适应</option>
+              <option value="9:16" ${d.aspect_ratio!=='16:9'?'selected':''}>9:16</option>
+              <option value="16:9" ${d.aspect_ratio==='16:9'?'selected':''}>16:9</option>
+              <option value="1:1" ${d.aspect_ratio==='1:1'?'selected':''}>1:1</option>
+              <option value="3:4" ${d.aspect_ratio==='3:4'?'selected':''}>3:4</option>
+              <option value="4:3" ${d.aspect_ratio==='4:3'?'selected':''}>4:3</option>
+              <option value="21:9" ${d.aspect_ratio==='21:9'?'selected':''}>21:9</option>
             </select>
             <select class="gen-duration" onchange="updateNodeData('${node.id}','duration',this.value)">
               <option value="4" ${d.duration==='4'?'selected':''}>4秒</option>
-              <option value="8" ${d.duration==='8'||!d.duration?'selected':''}>8秒</option>
+              <option value="5" ${d.duration==='5'?'selected':''}>5秒</option>
+              <option value="6" ${d.duration==='6'?'selected':''}>6秒</option>
+              <option value="7" ${d.duration==='7'?'selected':''}>7秒</option>
+              <option value="8" ${d.duration==='8'?'selected':''}>8秒</option>
+              <option value="9" ${d.duration==='9'?'selected':''}>9秒</option>
               <option value="10" ${d.duration==='10'?'selected':''}>10秒</option>
+              <option value="11" ${d.duration==='11'?'selected':''}>11秒</option>
               <option value="12" ${d.duration==='12'?'selected':''}>12秒</option>
+              <option value="13" ${d.duration==='13'?'selected':''}>13秒</option>
+              <option value="14" ${d.duration==='14'?'selected':''}>14秒</option>
               <option value="15" ${d.duration==='15'?'selected':''}>15秒</option>
             </select>
+            ${isFirstLast ? `<select class="gen-ratio" onchange="updateNodeData('${node.id}','resolution',this.value)">
+              <option value="480p" ${d.resolution==='480p'?'selected':''}>480p</option>
+              <option value="720p" ${d.resolution==='720p'?'selected':''}>720p</option>
+              <option value="1080p" ${d.resolution==='1080p'?'selected':''}>1080p</option>
+              <option value="2k" ${d.resolution==='2k'?'selected':''}>2k</option>
+              <option value="4k" ${d.resolution==='4k'?'selected':''}>4k</option>
+            </select>` : ''}
             <div class="spacer"></div>
             <div class="cost">≈0.08元</div>
-          </div>`;
+          </div>
+          <div style="display:flex;gap:5px;margin-top:4px">${firstSlot}${lastSlot}</div>
+          <div style="font-size:9px;color:#94A3B8;padding:2px 4px">首尾帧模式：图1必填，图2可选；普通模式：图1来自上游，忽略图2</div>`;
       }
 
       html += `<div class="node-progress-bar"><div class="fill" id="prog-${node.id}" style="width:0%"></div></div>`;
@@ -845,7 +937,7 @@
         btn.textContent = `运行选中 (${n})`;
         btn.disabled = false;
       } else if (selectedNode) {
-        btn.textContent = '运行当前链路';
+        btn.textContent = '运行选中 (1)';
         btn.disabled = false;
       } else {
         btn.textContent = '运行选中 (0)';
@@ -854,13 +946,23 @@
     }
 
     function runSelected() {
+      let nodeIds;
       if (selectedNodes.size > 0) {
-        runCanvas([...selectedNodes]);
+        nodeIds = [...selectedNodes];
       } else if (selectedNode) {
-        runCanvas([...getChainNodeIds(selectedNode)]);
+        nodeIds = [selectedNode];
       } else {
         alert('请先选择节点（单击选中运行链路，或 Shift+框选运行部分）');
+        return;
       }
+      // 严格检查前置依赖：必须所有直接上游都成功完成才能运行
+      const blocking = findBlockingUpstreams(nodeIds);
+      if (blocking.length > 0) {
+        const names = blocking.map(b => `${b.title}(${b.id.slice(0,6)})`).join('、');
+        alert(`以下上游节点尚未完成，请先运行它们：\n${names}\n\n补齐后再点击「运行选中」。`);
+        return;
+      }
+      runCanvas(nodeIds);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1143,20 +1245,25 @@
     // 运行画布
     // ═══════════════════════════════════════════════════════════════
     async function runCanvas(nodeIds) {
-      // nodeIds 可选：不传=运行全部；传=只运行该子集节点 + 子集内连线（独立链路）
+      // nodeIds 可选：不传=运行全部；传=只运行该子集节点
+      // 后端根据 canvas_id 查找上游历史产物，无需前端注入补丁
       let nodes = canvasData.nodes, conns = canvasData.connections;
+      let runSet = null;
       if (nodeIds && nodeIds.length) {
-        const idSet = new Set(nodeIds);
-        nodes = canvasData.nodes.filter(n => idSet.has(n.id));
-        conns = canvasData.connections.filter(c => idSet.has(c.from) && idSet.has(c.to));
+        runSet = new Set(nodeIds);
+        nodes = canvasData.nodes.filter(n => runSet.has(n.id));
+        conns = canvasData.connections.filter(c => runSet.has(c.from) && runSet.has(c.to));
       }
       if (nodes.length === 0) { alert('没有可运行的节点'); return; }
+
       Object.keys(pollTimers).forEach(stopPolling);
       const r = await _apiFetch('/api/canvas/run', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          canvas_id: activeCanvasId || '',                         // 画布定义 ID
           nodes: nodes.map(n => ({ id:n.id, type:n.type, x:n.x, y:n.y, data:n.data })),
-          connections: conns.map(c => ({ id:c.id, from:c.from, to:c.to }))
+          connections: conns.map(c => ({ id:c.id, from:c.from, to:c.to })),
+          run_node_ids: nodes.map(n => n.id),                      // 本次运行的节点
         })
       });
       const d = await r.json();
@@ -1328,6 +1435,7 @@
         })
       });
       const d = await r.json();
+      activeCanvasId = d.id;  // 保存后记住画布定义 ID，后续运行用此 ID
       alert(`已保存：${d.name}（${d.id}）`);
     }
 
@@ -1875,6 +1983,7 @@
     async function loadCanvas(id) {
       const r = await _apiFetch(`/api/canvas/${id}`);
       const d = await r.json();
+      activeCanvasId = id;  // 记住画布定义 ID，运行时传给后端
       // 清空当前画布
       canvasData.nodes.forEach(n => stopPolling(n.id));
       Object.values(nodeElements).forEach(el => el.remove());

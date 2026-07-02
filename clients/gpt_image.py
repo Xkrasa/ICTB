@@ -291,3 +291,88 @@ async def edit_image(
         files["mask"] = ("mask.png", mask_bytes, "image/png")
 
     return await _dispatch_edits(form_data, files)
+
+
+# ───────────────────────── 文生图（generations）─────────────────────────
+
+async def _post_generations_with_retry(
+    base_url: str, api_key: str, json_body: dict
+) -> bytes:
+    """generations 接口重试（JSON body，非 multipart）。"""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    last_err: Exception | None = None
+    async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as client:
+        for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
+            if backoff:
+                await asyncio.sleep(backoff)
+            try:
+                resp = await client.post(
+                    f"{base_url}/images/generations",
+                    headers=headers,
+                    json=json_body,
+                )
+                if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
+                    last_err = _ChannelExhausted(
+                        f"generations HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
+                    )
+                    continue
+                if resp.status_code in (401, 403):
+                    raise _ChannelExhausted(
+                        f"generations HTTP {resp.status_code}: {resp.text}"
+                    )
+                if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                    raise _ChannelBusinessError(
+                        f"generations HTTP {resp.status_code}: {resp.text}"
+                    )
+                resp.raise_for_status()
+                payload = resp.json()
+                return await _extract_image_bytes(payload)
+            except httpx.HTTPStatusError as e:
+                raise _ChannelExhausted(
+                    f"generations HTTP {e.response.status_code}: {e.response.text}"
+                ) from e
+            except httpx.HTTPError as e:
+                if attempt < len(_RETRY_BACKOFFS):
+                    last_err = _ChannelExhausted(f"generations 请求失败: {e}")
+                    continue
+                raise _ChannelExhausted(f"generations 请求失败: {e}") from e
+    raise last_err or _ChannelExhausted("generations 重试耗尽")
+
+
+async def _dispatch_generations(json_body: dict) -> bytes:
+    """generations 渠道分发：llm-api 优先，429/5xx 切 xhub。"""
+    last_err: Exception | None = None
+    for name, base_url, api_key in _channels():
+        try:
+            return await _post_generations_with_retry(base_url, api_key, json_body)
+        except _ChannelBusinessError:
+            raise
+        except _ChannelExhausted as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"所有同步渠道均失败（generations）。最后错误: {last_err}")
+
+
+async def generate_image(
+    prompt: str,
+    size: str | None = None,
+) -> bytes:
+    """文生图：prompt → PNG bytes（/images/generations，无参考图）。
+
+    与 edit_image 共用 size 校验、quality/thinking 配置、429 退避和同步 failover。
+    """
+    json_body = {
+        "model": config.GPT_IMAGE_MODEL,
+        "prompt": prompt + "\n高质量，画面中不要出现任何文字与水印。",
+        "size": _normalize_edit_size(size),
+        "quality": config.GPT_IMAGE_QUALITY,
+        "n": 1,
+        "background": "transparent",
+    }
+    if config.GPT_IMAGE_THINKING:
+        json_body["thinking"] = config.GPT_IMAGE_THINKING
+    return await _dispatch_generations(json_body)
