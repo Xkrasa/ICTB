@@ -25,6 +25,9 @@ import config
 from clients import gpt_image, rh_image, runninghub
 from clients.http_client import get_client
 from storage import storage
+from node_types import NODE_PORTS, NodeOutput
+from port_resolver import PortResolver
+from executors import NODE_EXECUTORS as _NODE_EXECUTORS
 
 logger = logging.getLogger("orchestrator")
 
@@ -83,91 +86,8 @@ _background_tasks: set = set()
 
 
 # ───────────────────────── 节点端口定义 ─────────────────────────
-
-NODE_PORTS: dict[str, dict] = {
-    "image_input": {
-        "inputs": [],
-        "outputs": [{"name": "image", "type": "IMAGE", "label": "图片"}],
-    },
-    "gpt_image": {
-        "inputs": [
-            {"name": "image1", "type": "IMAGE", "label": "图1 · 主体"},
-            {"name": "image2", "type": "IMAGE", "label": "图2 · 参考"},
-            {"name": "prompt", "type": "TEXT", "label": "提示词"},
-        ],
-        "outputs": [{"name": "image", "type": "IMAGE", "label": "生成图"}],
-    },
-    "remove_bg": {
-        "inputs": [{"name": "image", "type": "IMAGE", "label": "图片"}],
-        "outputs": [{"name": "image", "type": "IMAGE", "label": "透明图"}],
-    },
-    "mask_edit": {
-        "inputs": [{"name": "image", "type": "IMAGE", "label": "待编辑图"}],
-        "outputs": [
-            {"name": "image", "type": "IMAGE", "label": "原图"},
-            {"name": "mask", "type": "MASK", "label": "遮罩"},
-        ],
-    },
-    "seedance_video": {
-        "inputs": [
-            {"name": "first_frame", "type": "IMAGE", "label": "首帧"},
-            {"name": "last_frame", "type": "IMAGE", "label": "尾帧（可选）"},
-            {"name": "prompt", "type": "TEXT", "label": "视频描述"},
-        ],
-        "outputs": [{"name": "video", "type": "VIDEO", "label": "视频"}],
-    },
-}
-
-# 产物字段 → 端口字段名映射
-_OUTPUT_FIELD_MAP = {
-    "image_url": "image",
-    "video_url": "video",
-    "mask_url": "mask",
-}
-
-
-def _get_output_value(upstream_rec: dict, from_field: str | None) -> tuple[str, str] | None:
-    """根据上游记录和 from_field 获取要注入的产物。
-
-    返回 (产物键, 值) 或 None。
-    产物键用于与 _OUTPUT_FIELD_MAP 匹配，决定下游注入字段。
-    """
-    if from_field:
-        # from_field 是端口名，映射回产物键
-        reverse_map = {"image": "image_url", "video": "video_url", "mask": "mask_url"}
-        asset_key = reverse_map.get(from_field)
-        if asset_key and upstream_rec.get(asset_key):
-            return asset_key, upstream_rec[asset_key]
-        return None
-
-    # 无 from_field：按优先级取第一个可用产物
-    for asset_key in ("image_url", "video_url", "mask_url"):
-        if upstream_rec.get(asset_key):
-            return asset_key, upstream_rec[asset_key]
-    return None
-
-
-def _resolve_to_field(downstream_type: str, asset_key: str, to_field: str | None) -> str | None:
-    """根据下游节点类型、产物键和 to_field 确定最终注入到下游 data 的字段名。"""
-    if to_field:
-        return to_field
-
-    ports = NODE_PORTS.get(downstream_type, {})
-    inputs = ports.get("inputs", [])
-
-    # 优先按产物类型找同名输入端口
-    port_name = _OUTPUT_FIELD_MAP.get(asset_key)
-    if port_name:
-        for inp in inputs:
-            if inp["name"] == port_name:
-                return port_name
-        # 找不到同名端口：按类型找第一个匹配的输入端口
-        asset_type = "IMAGE" if asset_key == "image_url" else ("VIDEO" if asset_key == "video_url" else "MASK")
-        for inp in inputs:
-            if inp["type"] == asset_type:
-                return inp["name"]
-
-    return None
+# NODE_PORTS / _OUTPUT_FIELD_MAP / 端口注入逻辑已迁移至 node_types.py + port_resolver.py
+# orchestrator 通过 _NODE_EXECUTORS（executors 包）+ PortResolver 间接使用
 
 
 # ───────────────────────── TaskRegistry ─────────────────────────
@@ -458,7 +378,7 @@ async def execute_character(task_id: str, params: dict) -> None:
     registry.update(task_id, progress=15)
     registry.update(task_id, progress=25)
     # Phase 1 单任务路径：文字描述拼进 prompt，走 edit_image
-    # （画布路径 exec_gpt_image 走 generate_character 图片拼接换装）
+    # （画布路径走 executors/gpt_image.py 的 generate_character 图片拼接换装）
     hair = params.get("hair", "")
     makeup = params.get("makeup", "")
     clothing = params.get("clothing", "")
@@ -507,48 +427,18 @@ def _restore_from_node_data(rec: dict, node: dict) -> None:
         rec["progress"] = 100
 
 
-def _inject_upstream_to_downstreams(
-    canvas_id: str, upstream_id: str, upstream_rec: dict,
-    node_map: dict, adj: dict, conn_map: dict | None = None
+def _decrement_downstream_remaining(
+    canvas_id: str, upstream_id: str, adj: dict
 ) -> None:
-    """模拟一个不在 run_set 内的上游节点"已完成"：
-    将其产物注入所有下游的 node.data，并减少下游的 remaining 计数。
+    """非 run_set 的已成功上游：减少下游 remaining 计数。
 
-    与 _schedule_cascade(success=True) 功能相同，但用于重跑子集时
-    不在本次运行范围内的上游节点——它们的产物已存在 registry 中，
-    只需把产物传递给下游并减少入度，不实际执行节点。
+    原 _inject_upstream_to_downstreams 的入度减少职责。产物注入由
+    PortResolver 在执行时从 registry 读取，不再预注入到 node.data。
     """
     ctx = _canvas_contexts.get(canvas_id)
     if ctx is None:
         return
-
     for downstream in adj.get(upstream_id, []):
-        downstream_node = node_map.get(downstream, {})
-        downstream_data = downstream_node.get("data", {})
-        downstream_type = downstream_node.get("type", "")
-        changed = False
-
-        # 找到上游→下游的连线，按端口字段注入
-        conns = (conn_map or {}).get((upstream_id, downstream), [])
-        for conn in conns:
-            from_field = conn.get("fromField")
-            to_field = conn.get("toField")
-            resolved = _get_output_value(upstream_rec, from_field)
-            if resolved is None:
-                continue
-            asset_key, value = resolved
-            target_field = _resolve_to_field(downstream_type, asset_key, to_field)
-            if target_field is None:
-                continue
-            # 链路型节点允许被新上游产物覆盖
-            _OVERRIDABLE = {"gpt_image", "remove_bg", "mask_edit", "seedance_video"}
-            if not downstream_data.get(target_field) or downstream_type in _OVERRIDABLE:
-                downstream_data[target_field] = value
-                changed = True
-
-        if changed:
-            downstream_node["data"] = downstream_data
-
         ctx["remaining"][downstream] -= 1
 
 
@@ -615,7 +505,7 @@ def execute_canvas(
                 rec["task_id"] = None
                 rec["error"] = None
                 rec["progress"] = 0
-                # 有产物的节点保持 success 状态（供级联注入和 _inject_upstream_to_downstreams 使用）
+                # 有产物的节点保持 success 状态（供 PortResolver 执行时读取上游产物）
                 has_output = rec.get("image_url") or rec.get("video_url") or rec.get("mask_url")
                 if has_output:
                     rec["status"] = "success"
@@ -640,14 +530,14 @@ def execute_canvas(
         "approval_mode": approval_mode,
     }
 
-    # 对不在 run_set 中的上游节点，模拟"已完成"：
-    # 减少下游 remaining + 注入历史产物到下游 node.data
+    # 对不在 run_set 中的已成功上游：减少下游 remaining
+    # （产物注入由 PortResolver 在执行时从 registry 读取，不再预注入 node.data）
     for nid in node_map:
         if nid in run_set:
             continue
         rec = registry.get(f"{canvas_id}:{nid}")
         if rec and rec.get("status") == "success":
-            _inject_upstream_to_downstreams(canvas_id, nid, rec, node_map, adj, conn_map)
+            _decrement_downstream_remaining(canvas_id, nid, adj)
 
     # 启动 run_set 内 remaining 已归零的节点
     for nid in run_set:
@@ -660,30 +550,45 @@ def execute_canvas(
 _canvas_contexts: dict = {}  # canvas_id -> {node_map, adj, in_degree, remaining}
 
 
-def _start_node(canvas_id: str, node_id: str) -> None:
-    """创建 task 并启动节点执行。
+def _gather_upstream(canvas_id: str, node_id: str, ctx) -> tuple[list, list]:
+    """从 canvas context 收集本节点的上游 registry 记录 + 连到本节点的连线。"""
+    if not ctx or "conn_map" not in ctx:
+        return [], []
+    conn_map = ctx.get("conn_map", {})
+    conns = []
+    upstream_ids = set()
+    for (frm, to), cl in conn_map.items():
+        if to == node_id:
+            conns.extend(cl)
+            upstream_ids.add(frm)
+    upstream_recs = []
+    for uid in upstream_ids:
+        rec = registry.get(f"{canvas_id}:{uid}")
+        if rec:
+            upstream_recs.append(rec)
+    return upstream_recs, conns
 
-    如果 _canvas_contexts 中没有该 canvas（如服务重启后丢失），
-    但 registry 中有该节点的记录，则直接执行该节点（不做级联）。
-    """
+
+def _start_node(canvas_id: str, node_id: str) -> None:
+    """创建 task 并启动节点执行。PortResolver 在 _run_node 内解析上游注入。"""
     ctx = _canvas_contexts.get(canvas_id)
     if ctx is None:
-        # 重启后上下文丢失：如果 registry 有该节点，直接执行（无级联）
+        # 重启后上下文丢失：直接执行（无级联，PortResolver 无上游可注入）
         rec = registry.get(f"{canvas_id}:{node_id}")
         if rec is None or rec["status"] in ("success", "failed", "blocked", "interrupted"):
             return
         node_type = rec.get("node_type", "unknown")
-        # 通过公开方法查找上游 image_url（优先 image_input 节点）
         upstream_url = registry.find_canvas_image_url(canvas_id, node_id)
         if not upstream_url:
             return  # 无法获取上游产出，放弃
-        params = {"image_url": upstream_url}
+        # 构造最小 node（重启兜底：上游产物作为 image_url）
+        node = {"id": node_id, "type": node_type, "data": {"image_url": upstream_url}}
         task_id = uuid.uuid4().hex
         rec["task_id"] = task_id
         rec["status"] = "pending"
         rec["progress"] = 0
         rec["error"] = None
-        t = asyncio.create_task(_run_node(canvas_id, node_id, task_id, node_type, params))
+        t = asyncio.create_task(_run_node(canvas_id, node_id, task_id, node_type, node, []))
         _background_tasks.add(t)
         t.add_done_callback(_background_tasks.discard)
         return
@@ -691,7 +596,6 @@ def _start_node(canvas_id: str, node_id: str) -> None:
     node = ctx["node_map"].get(node_id)
     if node is None:
         return
-
     task_id = uuid.uuid4().hex
     rec = registry.get(f"{canvas_id}:{node_id}")
     if rec is None:
@@ -700,34 +604,45 @@ def _start_node(canvas_id: str, node_id: str) -> None:
     rec["status"] = "pending"
     rec["progress"] = 0
     rec["error"] = None
-
-    # 合并节点 data 和上游注入的参数
-    params = dict(node.get("data", {}))
-
-    t = asyncio.create_task(_run_node(canvas_id, node_id, task_id, node.get("type"), params))
+    t = asyncio.create_task(_run_node(canvas_id, node_id, task_id, node.get("type"), node, ctx))
     _background_tasks.add(t)
     t.add_done_callback(_background_tasks.discard)
 
 
 async def _run_node(canvas_id: str, node_id: str, task_id: str,
-                    node_type: str, params: dict) -> None:
-    """共享并发闸执行节点；成功后级联触发下游"""
+                    node_type: str, node: dict, ctx) -> None:
+    """共享并发闸执行节点；PortResolver 解析输入 → 执行器返回产物 → 引擎写 registry。"""
     try:
         async with SEM:
             registry.update(f"{canvas_id}:{node_id}", status="running", progress=0)
             executor = _NODE_EXECUTORS.get(node_type)
             if executor is None:
                 raise ValueError(f"未知节点类型: {node_type}")
-            await executor(canvas_id, node_id, params)
+            # PortResolver：从上游记录 + 连线产出类型化 input
+            upstream_recs, conns = _gather_upstream(canvas_id, node_id, ctx)
+            input_obj = PortResolver.resolve(node, upstream_recs, conns)
+            # 进度回调 + external_task_id 回调（执行器不碰 registry）
+            def on_progress(p):
+                registry.update(f"{canvas_id}:{node_id}", progress=p)
+            def on_submitted(tid):
+                registry.update(f"{canvas_id}:{node_id}", external_task_id=tid)
+            out: NodeOutput = await executor(input_obj, on_progress, on_submitted)
+
+        # 引擎写产物到 registry
+        asset_updates = {}
+        if out.image_url: asset_updates["image_url"] = out.image_url
+        if out.video_url: asset_updates["video_url"] = out.video_url
+        if out.mask_url:  asset_updates["mask_url"] = out.mask_url
+        if asset_updates:
+            registry.update(f"{canvas_id}:{node_id}", **asset_updates)
+        if out.image_url:
+            await _record_image_size(canvas_id, node_id, out.image_url)
 
         # 批准模式：AI 生成节点成功后暂停，等待用户审批
-        ctx = _canvas_contexts.get(canvas_id, {})
-        if ctx.get("approval_mode") and node_type in ("gpt_image", "seedance_video"):
+        if isinstance(ctx, dict) and ctx.get("approval_mode") and node_type in ("gpt_image", "seedance_video"):
             registry.update(
                 f"{canvas_id}:{node_id}",
-                status="awaiting_approval",
-                progress=100,
-                error=None,
+                status="awaiting_approval", progress=100, error=None,
             )
             logger.info("node %s:%s awaiting approval", canvas_id, node_id)
             return
@@ -771,12 +686,14 @@ def reject_node(canvas_id: str, node_id: str) -> dict:
 
 
 def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
-    """上游完成后：成功→减少下游入度并触发入度为 0 的；失败→下游标记 blocked"""
+    """上游完成后：成功→减少下游入度并触发入度为 0 的；失败→下游标记 blocked。
+
+    产物注入由 PortResolver 在 _run_node 执行时从 registry 读取，这里只管
+    入度计数 + 触发（原注入逻辑已删除）。
+    """
     ctx = _canvas_contexts.get(canvas_id)
     if ctx is None:
         return
-
-    conn_map = ctx.get("conn_map", {})
 
     for downstream in ctx["adj"].get(node_id, []):
         if not success:
@@ -789,450 +706,15 @@ def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
                 _schedule_cascade(canvas_id, downstream, success=False)
             continue
 
-        # 上游成功：把上游产出注入下游参数
-        upstream_rec = registry.get(f"{canvas_id}:{node_id}")
-        if upstream_rec is not None:
-            downstream_node = ctx["node_map"].get(downstream, {})
-            downstream_data = downstream_node.get("data", {})
-            downstream_type = downstream_node.get("type", "")
-            changed = False
-            _OVERRIDABLE = {"gpt_image", "remove_bg", "mask_edit", "seedance_video"}
-
-            # 按连线端口字段注入
-            conns = conn_map.get((node_id, downstream), [])
-            for conn in conns:
-                from_field = conn.get("fromField")
-                to_field = conn.get("toField")
-                resolved = _get_output_value(upstream_rec, from_field)
-                if resolved is None:
-                    continue
-                asset_key, value = resolved
-                target_field = _resolve_to_field(downstream_type, asset_key, to_field)
-                if target_field is None:
-                    continue
-                if not downstream_data.get(target_field) or downstream_type in _OVERRIDABLE:
-                    downstream_data[target_field] = value
-                    changed = True
-
-            if changed:
-                downstream_node["data"] = downstream_data
-
         ctx["remaining"][downstream] -= 1
         if ctx["remaining"][downstream] == 0:
             _start_node(canvas_id, downstream)
 
 
 # ───────────────────────── 节点执行器 ─────────────────────────
-
-async def exec_image_input(canvas_id: str, node_id: str, params: dict) -> None:
-    """图片输入节点：直接把上传的 image_url 作为产出，立即完成"""
-    url = params.get("image_url")
-    if not url:
-        raise ValueError("image_input 节点未上传图片")
-    registry.update(f"{canvas_id}:{node_id}", progress=50, image_url=url)
-    await _record_image_size(canvas_id, node_id, url)
-    await asyncio.sleep(0.1)  # 让 UI 有时间渲染
-    registry.update(f"{canvas_id}:{node_id}", progress=100)
-
-
-async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
-    """AI 生图节点：参考图 + prompt → PNG。
-
-    根据 params.model 分发到不同渠道：
-    - gpt-image-2: 原同步渠道，支持 mask 局部重绘与 hair/clothing 换装。
-    - rh_gpt_image_i2i / nano_banana_pro / nano_banana_2: RH 工作流异步渠道。
-    """
-    model = params.get("model", "gpt-image-2")
-    logger.info("exec_gpt_image model=%s", model)
-    # 兼容新端口字段 image1 / image2 和旧字段 image_url / image2_url
-    ref_url = params.get("image1") or params.get("image_url")
-    image2_url = params.get("image2") or params.get("image2_url")
-    if not ref_url and model not in ("rh_gpt_image_i2i", "gpt-image-2"):
-        raise ValueError("gpt_image 节点缺少输入图片（请连线 image_input 或上游节点）")
-
-    prompt = params.get("prompt", "")
-    aspect_ratio = params.get("aspect_ratio", "16:9")
-    resolution = params.get("resolution", "1024x1024")
-
-    registry.update(f"{canvas_id}:{node_id}", progress=5)
-
-    if model == "gpt-image-2":
-        await _exec_gpt_image_sync(canvas_id, node_id, params, ref_url)
-        return
-
-    # 以下走 RH 工作流异步渠道
-    if len(prompt) < 5:
-        if model == "rh_gpt_image_i2i" and not (ref_url or image2_url):
-            prompt = "生成高质量商业海报图像，画面精致，细节丰富。"
-        else:
-            prompt = "基于参考图生成高质量图像，保持人物特征。"
-
-    registry.update(f"{canvas_id}:{node_id}", progress=10)
-
-    if model == "rh_gpt_image_i2i":
-        primary_url = ref_url or image2_url
-        if primary_url:
-            ref_bytes = await storage.download(primary_url)
-            img2_bytes = None
-            if ref_url and image2_url:
-                img2_bytes = await storage.download(image2_url)
-            png_bytes = await rh_image.rh_gpt_image_i2i(
-                ref_bytes, img2_bytes, prompt, aspect_ratio, resolution,
-                on_progress=_rh_progress_cb(canvas_id, node_id),
-                on_submitted=lambda tid: registry.update(
-                    f"{canvas_id}:{node_id}", external_task_id=tid
-                ),
-            )
-        else:
-            png_bytes = await rh_image.rh_gpt_image_t2i(
-                prompt, aspect_ratio, resolution,
-                on_progress=_rh_progress_cb(canvas_id, node_id),
-                on_submitted=lambda tid: registry.update(
-                    f"{canvas_id}:{node_id}", external_task_id=tid
-                ),
-            )
-    elif model == "nano_banana_pro":
-        ref_bytes = await storage.download(ref_url)
-        png_bytes = await rh_image.nano_banana_pro(
-            ref_bytes, prompt, aspect_ratio, resolution,
-            on_progress=_rh_progress_cb(canvas_id, node_id),
-            on_submitted=lambda tid: registry.update(
-                f"{canvas_id}:{node_id}", external_task_id=tid
-            ),
-        )
-    elif model == "nano_banana_2":
-        ref_bytes = await storage.download(ref_url)
-        extra_urls = [
-            image2_url,
-            params.get("image3_url"),
-            params.get("image4_url"),
-            params.get("hair_url"),
-            params.get("clothing_url"),
-        ]
-        extra_urls = [u for u in extra_urls if u]
-        images = [ref_bytes]
-        for u in extra_urls[:3]:
-            images.append(await storage.download(u))
-        png_bytes = await rh_image.nano_banana_2(
-            images, prompt, aspect_ratio, resolution,
-            on_progress=_rh_progress_cb(canvas_id, node_id),
-            on_submitted=lambda tid: registry.update(
-                f"{canvas_id}:{node_id}", external_task_id=tid
-            ),
-        )
-    else:
-        raise ValueError(f"gpt_image 节点未知模型: {model}")
-
-    url = await storage.save(png_bytes, "png")
-    registry.update(f"{canvas_id}:{node_id}", progress=95, image_url=url)
-    await _record_image_size(canvas_id, node_id, url)
-
-
-async def _exec_gpt_image_sync(
-    canvas_id: str, node_id: str, params: dict, ref_url: str | None
-) -> None:
-    """gpt-image-2 同步渠道执行逻辑（generations / mask / hair / clothing / edit）。"""
-    prompt = params.get("prompt", "")
-    hair_url = params.get("hair_url")
-    makeup = params.get("makeup", "")
-    clothing_url = params.get("clothing_url")
-    mask_url = params.get("mask_url")
-    size = params.get("size") or params.get("resolution") or config.GPT_IMAGE_SIZE
-
-    registry.update(f"{canvas_id}:{node_id}", progress=15)
-
-    # 无参考图 → 文生图（/images/generations）
-    if not ref_url:
-        registry.update(f"{canvas_id}:{node_id}", progress=25)
-        png_bytes = await gpt_image.generate_image(
-            prompt or "生成高质量商业海报图像，画面精致，细节丰富。",
-            size=size,
-        )
-        url = await storage.save(png_bytes, "png")
-        registry.update(f"{canvas_id}:{node_id}", progress=90, image_url=url)
-        await _record_image_size(canvas_id, node_id, url)
-        return
-
-    ref_bytes = await storage.download(ref_url)
-
-    # 下载遮罩（如果有）
-    mask_bytes = None
-    if mask_url:
-        registry.update(f"{canvas_id}:{node_id}", progress=20)
-        mask_bytes = await storage.download(mask_url)
-
-    registry.update(f"{canvas_id}:{node_id}", progress=25)
-
-    # 有 mask 走局部重绘
-    if mask_bytes:
-        png_bytes = await gpt_image.edit_image(
-            ref_bytes,
-            prompt or "在遮罩区域重新生成，保持自然过渡",
-            mask_bytes=mask_bytes,
-            size=size,
-        )
-    elif hair_url or clothing_url:
-        # 图片换装：下载发型/服装参考图，拼接走 generate_character
-        hair_bytes = await storage.download(hair_url) if hair_url else None
-        clothing_bytes = await storage.download(clothing_url) if clothing_url else None
-        registry.update(f"{canvas_id}:{node_id}", progress=35)
-        png_bytes = await gpt_image.generate_character(
-            ref_bytes, hair_bytes, makeup, clothing_bytes, size=size
-        )
-    else:
-        # 有参考图走 edits，用用户 prompt（非弱默认值）
-        png_bytes = await gpt_image.edit_image(
-            ref_bytes,
-            prompt or "基于参考图生成高质量图像，保持人物特征，画面精致。",
-            size=size,
-        )
-
-    url = await storage.save(png_bytes, "png")
-    registry.update(f"{canvas_id}:{node_id}", progress=90, image_url=url)
-    await _record_image_size(canvas_id, node_id, url)
-
-
-async def exec_remove_bg(canvas_id: str, node_id: str, params: dict) -> None:
-    """抠图节点：通过 RunningHub AI App 生成透明背景 PNG。"""
-    if not config.RUNNINGHUB_API_KEY:
-        raise ValueError("未配置 RUNNINGHUB_API_KEY，请在 .env 中设置")
-
-    # 兼容新端口字段 image 和旧字段 image_url
-    ref_url = params.get("image") or params.get("image_url")
-    if not ref_url:
-        raise ValueError("remove_bg 节点缺少输入图片")
-
-    registry.update(f"{canvas_id}:{node_id}", progress=5)
-
-    # 下载输入图片
-    ref_bytes = await storage.download(ref_url)
-    registry.update(f"{canvas_id}:{node_id}", progress=15)
-
-    # 上传到 RunningHub
-    img_url = await runninghub.upload_image(ref_bytes, "remove_bg.png")
-    registry.update(f"{canvas_id}:{node_id}", progress=25)
-
-    # 提交 AI App 抠图工作流
-    workflow_id = config.RH_REMOVE_BG_WORKFLOW_ID
-    nodes = [
-        {"nodeId": "3", "fieldName": "image", "fieldValue": img_url, "description": "上传图片"},
-    ]
-    payload = {
-        "nodeInfoList": nodes,
-        "instanceType": "default",
-        "usePersonalQueue": "false",
-    }
-    client = get_client()
-    resp = await client.post(
-        f"{config.RUNNINGHUB_BASE_URL}/run/ai-app/{workflow_id}",
-        headers={
-            "Authorization": f"Bearer {config.RUNNINGHUB_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=config.RUNNINGHUB_TIMEOUT,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("errorCode"):
-        raise RuntimeError(
-            f"RH 抠图提交失败: {data.get('errorCode')} {data.get('errorMessage', '')}"
-        )
-    rh_task_id = data["taskId"]
-
-    registry.update(f"{canvas_id}:{node_id}", progress=35, external_task_id=rh_task_id)
-
-    # 轮询任务状态
-    elapsed = 0.0
-    while elapsed < config.RH_REMOVE_BG_POLL_TIMEOUT:
-        result = await runninghub.query_task(rh_task_id)
-        status = result.get("status", "")
-
-        if status == "SUCCESS":
-            results = result.get("results") or []
-            for r in results:
-                url = r.get("url")
-                if url:
-                    c = get_client()
-                    dl = await c.get(url, timeout=120)
-                    dl.raise_for_status()
-                    png_bytes = dl.content
-                    out_url = await storage.save(png_bytes, "png")
-                    registry.update(f"{canvas_id}:{node_id}", progress=95, image_url=out_url)
-                    await _record_image_size(canvas_id, node_id, out_url)
-                    return
-            raise RuntimeError(f"RH 抠图成功但无图片结果: {result}")
-
-        if status == "FAILED":
-            raise RuntimeError(
-                f"RH 抠图失败: {result.get('errorMessage', '')} "
-                f"errorCode={result.get('errorCode', '')}"
-            )
-
-        # 更新进度
-        progress = min(35 + int(elapsed / config.RH_REMOVE_BG_POLL_TIMEOUT * 55), 90)
-        registry.update(f"{canvas_id}:{node_id}", progress=progress)
-
-        await asyncio.sleep(config.RH_REMOVE_BG_POLL_INTERVAL)
-        elapsed += config.RH_REMOVE_BG_POLL_INTERVAL
-
-    raise RuntimeError(
-        f"RH 抠图超时（{config.RH_REMOVE_BG_POLL_TIMEOUT}s），task_id={rh_task_id}"
-    )
-
-
-async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> None:
-    """视频生成节点：RunningHub seedance 图生视频。
-
-    支持三种渠道：
-    - first_last_frame（首尾帧）：首帧必填，尾帧可选，走 RH AI App 工作流，
-      支持首帧→尾帧过渡动画，可自定义时长/比例/分辨率。
-    - official（官方稳定版）：仅首帧，走 seedance 原生 API，4/8/12s。
-    - low_cost（低价版）：仅首帧，走 seedance 原生 API，10/15s。
-    """
-    if not config.RUNNINGHUB_API_KEY:
-        raise ValueError("未配置 RUNNINGHUB_API_KEY，请在 .env 中设置")
-
-    # 兼容新端口字段 first_frame / last_frame 和旧字段 image_url / image2_url
-    ref_url = params.get("first_frame") or params.get("image_url")
-    if not ref_url:
-        raise ValueError("seedance_video 节点缺少输入图片（首帧）")
-    prompt = params.get("prompt", "")
-    if len(prompt) < 5:
-        prompt = "基于原图生成动态视频，人物自然微笑，缓慢转头。"
-    duration = params.get("duration", "8")
-    aspect_ratio = params.get("aspect_ratio", "9:16")
-    channel = params.get("channel", "official")
-
-    # ── 首尾帧模式 ──
-    if channel == "first_last_frame":
-        registry.update(f"{canvas_id}:{node_id}", progress=5)
-        ref_bytes = await storage.download(ref_url)
-        last_url = params.get("last_frame") or params.get("image2_url")
-        last_bytes = await storage.download(last_url) if last_url else None
-        registry.update(f"{canvas_id}:{node_id}", progress=10)
-        resolution = params.get("resolution", "480p")
-        video_bytes = await rh_image.seedance_first_last_frame(
-            ref_bytes, last_bytes, prompt,
-            duration=duration, aspect_ratio=aspect_ratio, resolution=resolution,
-            on_progress=_rh_progress_cb(canvas_id, node_id),
-            on_submitted=lambda tid: registry.update(
-                f"{canvas_id}:{node_id}", external_task_id=tid
-            ),
-        )
-        url = await storage.save(video_bytes, "mp4")
-        registry.update(f"{canvas_id}:{node_id}", progress=95, video_url=url)
-        return
-
-    # ── 官方/低价版模式（原逻辑） ──
-    registry.update(f"{canvas_id}:{node_id}", progress=5)
-    ref_bytes = await storage.download(ref_url)
-
-    registry.update(f"{canvas_id}:{node_id}", progress=10)
-    rh_image_url = await runninghub.upload_image(ref_bytes)
-
-    registry.update(f"{canvas_id}:{node_id}", progress=15)
-    task_id = await runninghub.image_to_video(
-        rh_image_url, prompt, duration, aspect_ratio
-    )
-
-    def on_progress(status: str) -> None:
-        if status == "QUEUED":
-            registry.update(f"{canvas_id}:{node_id}", progress=20)
-        elif status == "RUNNING":
-            cur = registry.get(f"{canvas_id}:{node_id}")
-            p = cur["progress"] if cur else 20
-            registry.update(f"{canvas_id}:{node_id}", progress=min(p + 5, 80))
-
-    registry.update(f"{canvas_id}:{node_id}", progress=20)
-    video_url = await runninghub.wait_for_result(task_id, on_progress)
-
-    registry.update(f"{canvas_id}:{node_id}", progress=85)
-    client = get_client()
-    resp = await client.get(video_url, timeout=120)
-    resp.raise_for_status()
-    video_bytes = resp.content
-
-    url = await storage.save(video_bytes, "mp4")
-    registry.update(f"{canvas_id}:{node_id}", progress=95, video_url=url)
-
-
-async def exec_mask_edit(canvas_id: str, node_id: str, params: dict) -> None:
-    """遮罩编辑节点：透传原图 + 注入 mask_url。
-
-    支持三种模式：
-    - auto_face：自动检测人脸并生成人脸遮罩
-    - auto_full：生成全图保留遮罩
-    - manual：使用前端手动绘制的 mask_url
-    """
-    # 兼容新端口字段 image 和旧字段 image_url
-    ref_url = params.get("image") or params.get("image_url")
-    mask_url = params.get("mask_url")
-    mode = params.get("mask_mode", "manual")
-    if not ref_url:
-        raise ValueError("mask_edit 节点缺少输入图片")
-
-    registry.update(f"{canvas_id}:{node_id}", progress=10)
-
-    if mode == "auto_face":
-        from mask_service import detect_face_mask, generate_full_mask
-        ref_bytes = await storage.download(ref_url)
-        registry.update(f"{canvas_id}:{node_id}", progress=30)
-        try:
-            expand = float(params.get("expand", 0.25))
-            face_index = int(params.get("face_index", -1))
-            detect_method = params.get("detect_method", "auto")
-            if detect_method not in ("auto", "opencv_haar", "opencv_yunet"):
-                detect_method = "auto"
-            mask_value = int(params.get("mask_value", 255))
-            mask_bytes = detect_face_mask(
-                ref_bytes, expand=expand, method=detect_method, face_index=face_index, mask_value=mask_value
-            )
-        except ValueError as e:
-            # 人脸检测失败：fallback 到全图遮罩，而不是直接失败
-            logger.warning("mask_edit auto_face failed for %s:%s: %s", canvas_id, node_id, e)
-            mask_bytes = generate_full_mask(ref_bytes)
-        mask_url = await storage.save(mask_bytes, "png")
-        registry.update(f"{canvas_id}:{node_id}", progress=70, mask_url=mask_url)
-    elif mode == "auto_full":
-        from mask_service import generate_full_mask
-        ref_bytes = await storage.download(ref_url)
-        registry.update(f"{canvas_id}:{node_id}", progress=40)
-        mask_bytes = generate_full_mask(ref_bytes)
-        mask_url = await storage.save(mask_bytes, "png")
-        registry.update(f"{canvas_id}:{node_id}", progress=70, mask_url=mask_url)
-    else:
-        # manual
-        if not mask_url:
-            raise ValueError("mask_edit 节点未绘制遮罩（请双击节点编辑遮罩，或切换自动模式）")
-
-    registry.update(f"{canvas_id}:{node_id}", progress=90, image_url=ref_url, mask_url=mask_url)
-    await _record_image_size(canvas_id, node_id, ref_url)
-    await asyncio.sleep(0.1)
-    registry.update(f"{canvas_id}:{node_id}", progress=100)
-
-
-# ───────────────────────── RH 工作流生图节点 ─────────────────────────
-
-def _rh_progress_cb(canvas_id: str, node_id: str):
-    """构造 RH 工作流进度回调：QUEUED→10%, RUNNING→20-80% 渐进。"""
-    def cb(status: str) -> None:
-        if status == "QUEUED":
-            registry.update(f"{canvas_id}:{node_id}", progress=15)
-        elif status == "RUNNING":
-            cur = registry.get(f"{canvas_id}:{node_id}")
-            p = cur["progress"] if cur else 20
-            registry.update(f"{canvas_id}:{node_id}", progress=min(p + 5, 80))
-    return cb
-
-
-_NODE_EXECUTORS: dict = {
-    "image_input": exec_image_input,
-    "mask_edit": exec_mask_edit,
-    "gpt_image": exec_gpt_image,
-    "remove_bg": exec_remove_bg,
-    "seedance_video": exec_seedance_video,
-}
+# 5 个执行器已迁移至 executors/ 包（纯函数：input → NodeOutput）。
+# 注册表 _NODE_EXECUTORS 在文件顶部从 executors 包导入。
+# 原 _rh_progress_cb 迁移至 executors/_helpers.py（make_rh_progress_cb）。
 
 
 # ═════════════════════════ Phase 4: 批量编排 ═════════════════════════
