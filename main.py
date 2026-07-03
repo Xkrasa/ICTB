@@ -219,6 +219,12 @@ async def canvas_run(req: CanvasRunRequest):
     return {"canvas_id": canvas_id, "node_statuses": node_statuses}
 
 
+@app.get("/api/canvas/{canvas_id}/nodes")
+async def get_canvas_nodes(canvas_id: str):
+    """批量查询画布所有节点实时状态（前端轮询聚合用，1 次请求替代 N 次）。"""
+    return {"nodes": orchestrator.registry.get_canvas_nodes(canvas_id)}
+
+
 @app.get("/api/canvas/{canvas_id}/nodes/{node_id}")
 async def get_node_status(canvas_id: str, node_id: str):
     """查询单个节点的实时状态（前端轮询用）"""

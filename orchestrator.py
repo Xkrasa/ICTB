@@ -342,6 +342,28 @@ class TaskRegistry:
             return candidates[0][1]
         return None
 
+    def get_canvas_nodes(self, canvas_id: str) -> list[dict]:
+        """批量返回某 canvas 下所有节点的实时状态（前端轮询聚合用）。
+
+        遍历 registry 中 key 前缀为 "{canvas_id}:" 的记录，返回精简状态列表。
+        替代前端 N 节点 N 次 GET 的逐节点轮询，降为 1 次 GET。
+        """
+        prefix = f"{canvas_id}:"
+        result = []
+        for key, rec in self._tasks.items():
+            if not key.startswith(prefix):
+                continue
+            result.append({
+                "node_id": rec.get("node_id"),
+                "status": rec.get("status"),
+                "progress": rec.get("progress", 0),
+                "image_url": rec.get("image_url"),
+                "video_url": rec.get("video_url"),
+                "mask_url": rec.get("mask_url"),
+                "error": rec.get("error"),
+            })
+        return result
+
     def close(self) -> None:
         """关闭持久连接（FastAPI lifespan 关闭时调用）。"""
         with self._lock:

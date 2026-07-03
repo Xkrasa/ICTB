@@ -1804,22 +1804,38 @@
     window.approveNode = approveNode;
     window.rejectNode = rejectNode;
 
+    // ─── 轮询聚合：单定时器批量拉取所有节点状态，替代 N 节点 N 次 GET ───
+    let canvasPollTimer = null;
     function startPolling(nodeId) {
-      if (pollTimers[nodeId]) clearInterval(pollTimers[nodeId]);
-      pollTimers[nodeId] = setInterval(async () => {
+      // 兼容旧调用：启动整个画布的批量轮询（nodeId 参数忽略）
+      startCanvasPolling();
+    }
+    function startCanvasPolling() {
+      if (canvasPollTimer) return;  // 已在轮询
+      canvasPollTimer = setInterval(async () => {
         if (!currentCanvasId) return;
         try {
-          const r = await _apiFetch(`/api/canvas/${currentCanvasId}/nodes/${nodeId}`);
+          const r = await _apiFetch(`/api/canvas/${currentCanvasId}/nodes`);
           if (!r.ok) return;
-          const d = await r.json();
-          updateNodeUI(nodeId, d);
-          if (['success','failed','blocked'].includes(d.status)) { stopPolling(nodeId); checkAllDone(); }
-          // 待批准状态保持轮询，同时渲染通过/拒绝按钮
-          if (d.status === 'awaiting_approval') { renderApprovalActions(nodeId); }
+          const data = await r.json();
+          const nodes = data.nodes || [];
+          let allDone = nodes.length > 0;
+          for (const d of nodes) {
+            updateNodeUI(d.node_id, d);
+            if (!['success','failed','blocked','interrupted','awaiting_approval'].includes(d.status)) allDone = false;
+            if (d.status === 'awaiting_approval') renderApprovalActions(d.node_id);
+          }
+          if (allDone) { stopCanvasPolling(); checkAllDone(); }
         } catch(e) {}
       }, 800);
     }
-    function stopPolling(nodeId) { if (pollTimers[nodeId]) { clearInterval(pollTimers[nodeId]); delete pollTimers[nodeId]; renderConnections(); } }
+    function stopPolling(nodeId) {
+      // 兼容旧调用：停整个画布轮询（nodeId 参数忽略）
+      stopCanvasPolling();
+    }
+    function stopCanvasPolling() {
+      if (canvasPollTimer) { clearInterval(canvasPollTimer); canvasPollTimer = null; renderConnections(); }
+    }
     function updateNodeUI(nodeId, d) {
       const prevStatus = nodeRuntime[nodeId]?.status;
       nodeRuntime[nodeId] = { status: d.status, progress: d.progress, image_url: d.image_url, video_url: d.video_url, mask_url: d.mask_url };
@@ -1877,7 +1893,7 @@
       if (layer) layer.remove();
     }
     function checkAllDone() {
-      if (Object.keys(pollTimers).length === 0) {
+      if (!canvasPollTimer) {
         updateStatusbar('done');
         const outputs = getCompareOutputs();
         if (outputs.length >= 2) showCompare();
@@ -2157,4 +2173,6 @@ Object.assign(TuanboApp.canvas, {
   saveCanvas: saveCanvas,
   newProject: newProject,
   cloneCanvas: cloneCanvas,
+  startCanvasPolling: startCanvasPolling,
+  stopCanvasPolling: stopCanvasPolling,
 });
