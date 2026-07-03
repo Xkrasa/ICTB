@@ -63,10 +63,30 @@
     <button class="tb-btn" id="btn-undo" onclick="undo()" title="撤销 (Ctrl+Z)" disabled>撤销</button>
     <button class="tb-btn" id="btn-redo" onclick="redo()" title="重做 (Ctrl+Y)" disabled>重做</button>
     <button class="tb-btn" onclick="showCompare()" title="对比运行结果">对比</button>
+    <button class="tb-btn" id="btn-approval" onclick="toggleApprovalMode()" title="开启后 AI 生成节点产出需手动批准才继续下游">批准模式</button>
     <button class="tb-btn" onclick="runChain()" title="从链路源头开始级联运行（会重跑上游）">运行链路</button>
     <button class="tb-btn" id="btn-run-selected" onclick="runSelected()" title="只运行选中节点，要求所有上游必须先成功" disabled>运行选中 (0)</button>
     <button class="tb-btn primary" onclick="runCanvas()">▶ 运行全部</button>
   </div>
+
+  <!-- ═══════════ 左侧项目抽屉 ═══════════ -->
+  <button id="project-drawer-toggle" onclick="toggleProjectDrawer()" title="项目列表">
+    <svg><use href="#icon-list"/></svg>
+  </button>
+  <div id="project-drawer-overlay" onclick="closeProjectDrawer()"></div>
+  <aside id="project-drawer">
+    <div class="pd-header">
+      <span class="pd-title">项目</span>
+      <button class="pd-close" onclick="closeProjectDrawer()">✕</button>
+    </div>
+    <div class="pd-actions">
+      <button class="tb-btn primary" onclick="newProjectFromDrawer()" style="padding:5px 10px;font-size:11px">+ 新建项目</button>
+      <button class="tb-btn" onclick="loadCanvasList()" style="padding:5px 10px;font-size:11px">管理</button>
+    </div>
+    <div id="project-drawer-body">
+      <div style="color:#5a6573;font-size:12px;text-align:center;padding:20px">加载中...</div>
+    </div>
+  </aside>
 
   <!-- ═══════════ 视口层 ═══════════ -->
   <div id="viewport">
@@ -78,7 +98,7 @@
   </div>
 
   <!-- ═══════════ 运营前台 ═══════════ -->
-  <div id="ops-view" style="display:none; position:fixed; top:48px; left:0; right:0; bottom:0; overflow:auto;">
+  <div id="ops-view" style="display:none; position:fixed; top:52px; left:0; right:0; bottom:0; overflow:auto;">
     <div class="ops-grid">
       <!-- 左栏：主播库 -->
       <aside class="ops-panel" style="height:fit-content; position:sticky; top:0;">
@@ -193,11 +213,14 @@
     <div class="menu-item" onclick="addNodeAt('seedance_video', ctxPos.x, ctxPos.y)"><span class="mi-icon"><svg><use href="#icon-video"/></svg></span>视频生成</div>
   </div>
 
-  <!-- 画布列表弹窗 -->
+  <!-- 项目 / 画布列表弹窗 -->
   <div id="canvas-modal" onclick="if(event.target===this)closeModal()">
     <div class="modal-box" style="position:relative">
       <span class="close-btn" onclick="closeModal()">✕</span>
-      <div class="modal-title">已保存的画布</div>
+      <div class="modal-title" style="display:flex;align-items:center;gap:12px">
+        <span>项目列表</span>
+        <button class="tb-btn primary" onclick="newProject()" style="padding:5px 10px;font-size:11px">+ 新建项目</button>
+      </div>
       <div id="canvas-list-body"></div>
     </div>
   </div>
@@ -247,10 +270,15 @@
   <!-- 状态栏 -->
   <div id="statusbar">
     <div class="sb-item"><span class="sb-dot" id="sb-dot"></span><span id="sb-status">就绪</span></div>
-    <div class="sb-item">节点: <span id="sb-nodes">0</span></div>
-    <div class="sb-item">连线: <span id="sb-conns">0</span></div>
+    <div class="sb-divider"></div>
+    <div class="sb-item"><span class="sb-key">节点</span><span class="sb-val" id="sb-nodes">0</span></div>
+    <div class="sb-item"><span class="sb-key">连线</span><span class="sb-val" id="sb-conns">0</span></div>
+    <div class="sb-divider"></div>
+    <div class="sb-item"><span class="sb-dot running" style="display:none" id="sb-dot-running"></span><span class="sb-key">运行中</span><span class="sb-val" id="sb-running">0</span></div>
+    <div class="sb-item"><span class="sb-dot success" style="opacity:0.5"></span><span class="sb-key">完成</span><span class="sb-val" id="sb-success">0</span></div>
+    <div class="sb-item"><span class="sb-dot failed" style="opacity:0.5"></span><span class="sb-key">失败</span><span class="sb-val" id="sb-failed">0</span></div>
     <div style="flex:1"></div>
-    <div class="sb-item" style="color:#444">右键添加节点 · 拖端口连线 · 滚轮缩放 · 中键/空格平移</div>
+    <div class="sb-item" style="color:var(--text-4)">右键添加节点 · 拖端口连线 · 滚轮缩放 · 中键/空格平移</div>
   </div>
 
   <div id="side-panel-overlay" onclick="closeSidePanel()"></div>

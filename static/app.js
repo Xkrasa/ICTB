@@ -33,6 +33,7 @@
     const nodeElements = {};
     let nodeRuntime = {};  // {nodeId: {status, progress, image_url}} 运行态，不持久化
     let clipboardGraph = null;  // {nodes: [...], connections: [...]} 复制粘贴剪贴板
+    let approvalMode = localStorage.getItem('approval_mode') === 'true';  // 批准模式全局开关
 
     let viewX = 100, viewY = 70, viewScale = 1;
     let isPanning = false, panStart = null;
@@ -48,7 +49,41 @@
       mask_edit:        { icon: 'brush',   title: '遮罩编辑',          color: 'var(--c-mask_edit)' },
       seedance_video:   { icon: 'video',   title: '视频生成',          color: 'var(--c-seedance)' },
     };
-    const STATUS_LABELS = { idle:'待机', pending:'排队', running:'运行中', success:'完成', failed:'失败', blocked:'阻断' };
+    // 节点端口定义（与后端 orchestrator.NODE_PORTS 保持一致）
+    const NODE_PORTS = {
+      image_input: {
+        inputs: [],
+        outputs: [{ name: 'image', type: 'IMAGE', label: '图片' }]
+      },
+      gpt_image: {
+        inputs: [
+          { name: 'image1', type: 'IMAGE', label: '图1 · 主体' },
+          { name: 'image2', type: 'IMAGE', label: '图2 · 参考' },
+          { name: 'prompt', type: 'TEXT',  label: '提示词' }
+        ],
+        outputs: [{ name: 'image', type: 'IMAGE', label: '生成图' }]
+      },
+      remove_bg: {
+        inputs: [{ name: 'image', type: 'IMAGE', label: '图片' }],
+        outputs: [{ name: 'image', type: 'IMAGE', label: '透明图' }]
+      },
+      mask_edit: {
+        inputs: [{ name: 'image', type: 'IMAGE', label: '待编辑图' }],
+        outputs: [
+          { name: 'image', type: 'IMAGE', label: '原图' },
+          { name: 'mask',  type: 'MASK',  label: '遮罩' }
+        ]
+      },
+      seedance_video: {
+        inputs: [
+          { name: 'first_frame', type: 'IMAGE', label: '首帧' },
+          { name: 'last_frame',  type: 'IMAGE', label: '尾帧（可选）' },
+          { name: 'prompt',      type: 'TEXT',  label: '视频描述' }
+        ],
+        outputs: [{ name: 'video', type: 'VIDEO', label: '视频' }]
+      }
+    };
+    const STATUS_LABELS = { idle:'待机', pending:'排队', running:'运行中', success:'完成', failed:'失败', blocked:'阻断', awaiting_approval:'待批准' };
 
     function uid() { return Math.random().toString(36).slice(2, 10); }
 
@@ -147,10 +182,10 @@
     function getDefaultData(type) {
       switch (type) {
         case 'image_input': return { image_url: null };
-        case 'gpt_image': return { prompt:'', hair_url:'', makeup:'', clothing_url:'', model:'gpt-image-2', size:'1024x1024', image2_url:'', image3_url:'', image4_url:'' };
+        case 'gpt_image': return { prompt:'', hair_url:'', makeup:'', clothing_url:'', model:'gpt-image-2', size:'1024x1024', image1:'', image2:'', image2_url:'', image3_url:'', image4_url:'' };
         case 'remove_bg': return {};
-        case 'mask_edit': return { mask_url: null };
-        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16', channel:'official', image_url:'', image2_url:'', resolution:'480p' };
+        case 'mask_edit': return { mask_url: null, mask_mode: 'auto_face' };
+        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16', channel:'official', first_frame:'', last_frame:'', image_url:'', image2_url:'', resolution:'480p' };
         default: return {};
       }
     }
@@ -225,6 +260,15 @@
     function getUpstreamNodeIds(nodeId) {
       return canvasData.connections.filter(c => c.to === nodeId).map(c => c.from);
     }
+    // 获取连到指定目标端口的 upstream 信息 { node, fromField, conn }
+    function getUpstreamByPort(nodeId, toField) {
+      const conns = canvasData.connections.filter(c => c.to === nodeId);
+      const conn = conns.find(c => c.toField === toField) || conns[0];
+      if (!conn) return null;
+      const node = canvasData.nodes.find(n => n.id === conn.from);
+      if (!node) return null;
+      return { node, fromField: conn.fromField, conn };
+    }
     function findBlockingUpstreams(nodeIds) {
       const blocking = [];
       const checked = new Set();
@@ -271,7 +315,9 @@
           canvasData.connections.push({
             id: uid(),
             from: idMap[c.from],
-            to: idMap[c.to]
+            to: idMap[c.to],
+            fromField: c.fromField,
+            toField: c.toField
           });
         }
       }
@@ -286,8 +332,11 @@
     function renderNode(node) {
       const cfg = NODE_CFG[node.type] || { icon:null, title:node.type, color:'#555' };
       const el = document.createElement('div');
-      el.className = 'node' + (node.type === 'gpt_image' || node.type === 'seedance_video' ? ' gen-node' : '');
-      if (selectedNodes.has(node.id)) el.classList.add('box-selected');
+      let cls = 'node';
+      if (node.type === 'gpt_image') cls += ' gen-node';
+      if (node.type === 'seedance_video') cls += ' video-node';
+      if (selectedNodes.has(node.id)) cls += ' box-selected';
+      el.className = cls;
       el.style.left = node.x + 'px'; el.style.top = node.y + 'px';
       el.style.setProperty('--node-color', cfg.color);
       el.dataset.id = node.id;
@@ -299,214 +348,192 @@
       return el;
     }
     function buildNodeHTML(node, cfg) {
-      const inPort = node.type === 'image_input' ? '' : '<div class="port port-in" data-port="in"></div>';
-      const outPort = '<div class="port port-out" data-port="out"></div>';
+      const ports = NODE_PORTS[node.type] || { inputs: [], outputs: [] };
+      const inputs = ports.inputs || [];
+      const outputs = ports.outputs || [];
+      const inPorts = inputs.map((p, i) =>
+        `<div class="port port-in" data-port="in" data-portname="${p.name}" data-porttype="${p.type}"
+             style="--port-index:${i};--port-count:${inputs.length}">
+          <span class="port-label">${p.label}</span>
+        </div>`
+      ).join('');
+      const outPorts = outputs.map((p, i) =>
+        `<div class="port port-out" data-port="out" data-portname="${p.name}" data-porttype="${p.type}"
+             style="--port-index:${i};--port-count:${outputs.length}">
+          <span class="port-label">${p.label}</span>
+        </div>`
+      ).join('');
       const iconSvg = cfg.icon ? `<svg class="node-icon-svg"><use href="#icon-${cfg.icon}"/></svg>` : '';
-      return `${inPort}${outPort}
-        <button class="node-delete" onclick="removeNode('${node.id}')">✕</button>
-        <div class="node-header" data-id="${node.id}">
+      const rt = nodeRuntime[node.id] || {};
+      const status = rt.status || 'idle';
+      const label = STATUS_LABELS[status] || '待机';
+      return `${inPorts}${outPorts}
+        <button class="node-delete" onclick="event.stopPropagation();removeNode('${node.id}')" title="删除节点">✕</button>
+        <div class="node-title-float" data-role="drag">
           <span class="node-icon">${iconSvg}</span>
           <span class="node-title">${cfg.title}</span>
-          <span class="node-badge" id="badge-${node.id}">待机</span>
+          <span class="node-id">#${node.id.slice(0,6)}</span>
         </div>
-        <div class="node-body">${buildNodeBody(node)}</div>`;
+        <div class="node-status-float">
+          <span class="node-badge ${status}" id="badge-${node.id}">${label}</span>
+        </div>
+        <div class="node-preview-layer" data-role="preview">${buildNodePreview(node)}</div>
+        <div class="node-meta-float">${buildNodeMeta(node)}</div>
+        <div class="node-progress-bar"><div class="fill" id="prog-${node.id}" style="width:0%"></div></div>`;
     }
-    function buildNodeBody(node) {
+    // 端口类型映射（用于配色）
+    function portTypeFor(nodeType, dir) {
+      const ports = NODE_PORTS[nodeType];
+      if (!ports) return 'IMAGE';
+      const list = dir === 'out' ? ports.outputs : ports.inputs;
+      if (list && list.length) return list[0].type;
+      return 'IMAGE';
+    }
+    // 预览层：仅保留图片/视频/占位；无参数控件
+    function buildNodePreview(node) {
       const d = node.data;
-      let html = '';
+      // mask_edit 特殊：底图 + 遮罩叠加
+      if (node.type === 'mask_edit') {
+        let baseUrl = d.image_url || '';
+        if (!baseUrl) {
+          const up = getUpstreamByPort(node.id, 'image');
+          if (up) baseUrl = (nodeRuntime[up.node.id]?.image_url) || up.node.data.image_url || '';
+        }
+        if (baseUrl || d.mask_url) {
+          return `<div class="mask-stack">
+            ${baseUrl ? `<img class="mask-base" src="${baseUrl}"/>` : ''}
+            ${d.mask_url ? `<img class="mask-overlay" src="${d.mask_url}"/>` : ''}
+            <div class="mask-hint">${d.mask_url ? '双击可重新编辑遮罩' : '双击开始绘制遮罩'}</div>
+            ${buildPreviewTools(d.mask_url || baseUrl)}
+          </div>`;
+        }
+        return `<div class="preview-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 20l9-9-9-9-9 9 9 9zM12 4v16"/></svg>
+          <span>请连线上游图片</span>
+          <span class="empty-hint">双击开始绘制遮罩</span>
+        </div>`;
+      }
+      // 视频节点：优先视频，其次首帧
+      if (node.type === 'seedance_video') {
+        if (d.video_url) {
+          return `<video src="${d.video_url}" muted playsinline preload="metadata"></video>
+            ${buildPreviewTools(d.video_url, true)}`;
+        }
+        const firstFrame = d.first_frame || d.image_url;
+        if (firstFrame) {
+          return `<img src="${firstFrame}"/>${buildPreviewTools(firstFrame)}`;
+        }
+        return `<div class="preview-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="6" width="18" height="12" rx="2"/><path d="M10 9l5 3-5 3z"/></svg>
+          <span>视频生成</span>
+          <span class="empty-hint">点击节点编辑参数</span>
+        </div>`;
+      }
+      // 通用图片预览
       if (d.image_url) {
-        html += `<div class="node-preview" onclick="openLightbox('${d.image_url}')"><div class="checkerboard"></div><img src="${d.image_url}" /></div>`;
-      } else {
-        html += `<div class="node-preview"><div class="checkerboard"></div><span class="preview-placeholder"></span></div>`;
+        return `<img src="${d.image_url}"/>${buildPreviewTools(d.image_url)}`;
       }
-      if (d._width && d._height) {
-        html += `<div class="node-dim">${d._width} x ${d._height}</div>`;
+      // 失败态：显示错误信息
+      if (d._error) {
+        const errMatch = d._error.match(/^\[([A-Z]\d+)\]\s*(.+?):\s*/);
+        const errCode = errMatch ? errMatch[1] : '';
+        const errLabel = errMatch ? errMatch[2] : '';
+        const errDetail = errMatch ? d._error.slice(errMatch[0].length) : d._error;
+        return `<div class="preview-empty" style="color:var(--danger);">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
+          <span style="font-weight:600;">${errCode ? errCode + ' ' : ''}生成失败</span>
+          ${errLabel ? `<span class="empty-hint" style="color:var(--danger);opacity:0.8;">${errLabel}</span>` : ''}
+          <span class="empty-hint" style="max-width:200px;word-break:break-all;opacity:0.6;">${errDetail.substring(0, 80)}${errDetail.length > 80 ? '...' : ''}</span>
+        </div>`;
       }
-      if (node.type === 'image_input') {
-        html += `<div style="display:flex;gap:4px;align-items:center">
-          <label class="upload-btn" for="upload-${node.id}"><span>上传图片</span></label>
-          ${d.image_url ? `<button class="ref-clear" onclick="clearNodeField('${node.id}','image_url')">清除</button>` : ''}
-        </div>
-          <input id="upload-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadImage('${node.id}',this)" />`;
-      } else if (node.type === 'gpt_image') {
-        const model = d.model || 'gpt-image-2';
-        const cfg = AI_IMAGE_MODEL_CFG[model] || AI_IMAGE_MODEL_CFG['gpt-image-2'];
-        const thumb = d.image_url ? `<img src="${d.image_url}" onclick="openLightbox('${d.image_url}')" style="cursor:pointer" />` : `<span class="gen-thumb-empty">?</span>`;
-        const prompt = d.prompt || getDefaultImagePrompt();
-        const isGptImage2 = model === 'gpt-image-2';
-        const size = d.size || d.resolution || cfg.defaultSize || '1024x1024';
-        const ar = d.aspect_ratio || cfg.defaultAspect;
-        const res = d.resolution || cfg.defaultRes;
-        const modelOptions = Object.entries(AI_IMAGE_MODEL_CFG).map(([k,v]) =>
-          `<option value="${k}" ${k===model?'selected':''}>${v.label}</option>`
-        ).join('');
-        const sizeOptions = (cfg.sizes || []).map(s =>
-          `<option value="${s}" ${s===size?'selected':''}>${s}</option>`
-        ).join('');
-        const resOptions = (cfg.resolutions || []).map(r =>
-          `<option value="${r}" ${r===res?'selected':''}>${r}</option>`
-        ).join('');
-        const arOptions = (cfg.aspectRatios || []).map(a =>
-          `<option value="${a}" ${a===ar?'selected':''}>${a}</option>`
-        ).join('');
-        const refSlot = (field, label) => `
-          <div style="flex:1;position:relative">
-            <div class="node-label">${label}</div>
-            <div class="ref-upload" ${d[field] ? `onclick="event.stopPropagation();openLightbox('${d[field]}')"` : `onclick="document.getElementById('upload-${field}-${node.id}').click()"`}>
-              ${d[field] ? `<img src="${d[field]}" />` : `<span class="ref-upload-empty">+ 上传</span>`}
-            </div>
-            ${d[field] ? `<button class="ref-clear" onclick="event.stopPropagation();clearNodeField('${node.id}','${field}')">&times;</button>` : ''}
-            <input id="upload-${field}-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadRefImage('${node.id}','${field}',this)" />
-          </div>`;
-        // 图1·主体图：只读，来自上游连线产出（不随自身运行结果变化）
-        const refSlotReadOnly = (url, label) => `
-          <div style="flex:1;position:relative;${url?'':'opacity:0.55'}">
-            <div class="node-label">${label}</div>
-            <div class="ref-upload" ${url ? `onclick="event.stopPropagation();openLightbox('${url}')"` : ''}>
-              ${url ? `<img src="${url}" />` : `<span class="ref-upload-empty">来自上游</span>`}
-            </div>
-          </div>`;
-        const upConn = canvasData.connections.find(c => c.to === node.id);
-        let img1Url = '';
-        if (upConn) {
-          const up = canvasData.nodes.find(n => n.id === upConn.from);
-          if (up) { const rt = nodeRuntime[up.id]; img1Url = (rt && rt.image_url) || up.data.image_url || ''; }
-        }
-        if (!img1Url) img1Url = d.image_url || '';
-        const slot1 = refSlotReadOnly(img1Url, '图1 · 主体图');
-        let refSlotsHtml = '';
-        if (model === 'gpt-image-2') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${slot1}${refSlot('hair_url','图2 · 发型')}${refSlot('clothing_url','图3 · 服装')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">顺序：图1(上游) → 图2 → 图3</div>`;
-        } else if (model === 'rh_gpt_image_i2i') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${slot1}${refSlot('image2_url','图2 · 参考图')}</div><div style="font-size:9px;color:#94A3B8;padding:2px 4px">有图1=图生图；图1空=文生图</div>`;
-        } else if (model === 'nano_banana_2') {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${slot1}${refSlot('image2_url','图2')}${refSlot('image3_url','图3')}${refSlot('image4_url','图4')}</div>`;
-        } else {
-          refSlotsHtml = `<div style="display:flex;gap:5px;margin-top:4px">${slot1}</div>`;
-        }
-        html += `
-          <div class="gen-prompt-box">
-            <div class="gen-thumb">${thumb}</div>
-            <div class="gen-textarea-wrap">
-              <textarea placeholder="输入提示词..." oninput="updateNodeData('${node.id}','prompt',this.value); updateCharCount(this)">${prompt}</textarea>
-              <div class="gen-char-count">${prompt.length} / 2500</div>
-            </div>
-          </div>
-          <div class="gen-toolbar">
-            <select class="gen-model" onchange="setNodeModel('${node.id}',this.value)">
-              ${modelOptions}
-            </select>
-            ${isGptImage2 ? `
-              <select class="gen-ratio" onchange="updateNodeData('${node.id}','size',this.value)">
-                ${sizeOptions}
-              </select>` : `
-              <select class="gen-ratio" onchange="updateNodeData('${node.id}','aspect_ratio',this.value)">
-                ${arOptions}
-              </select>
-              <select class="gen-ratio" onchange="updateNodeData('${node.id}','resolution',this.value)">
-                ${resOptions}
-              </select>`}
-            <div class="spacer"></div>
-            <button class="magic-btn" onclick="polishPrompt('${node.id}')">润色</button>
-            <div class="cost">${cfg.cost}</div>
-          </div>
-          ${refSlotsHtml}`;
-      } else if (node.type === 'mask_edit') {
-        const maskUpstreams = canvasData.connections.filter(c => c.to === node.id).map(c => canvasData.nodes.find(n => n.id === c.from)).filter(Boolean);
-        const maskSrc = maskUpstreams[0];
-        const srcUrl = d.image_url || (maskSrc && (nodeRuntime[maskSrc.id]?.image_url || maskSrc.data.image_url));
-        if (srcUrl) {
-          html += `<div class="node-preview" onclick="openLightbox('${srcUrl}')"><div class="checkerboard"></div><img src="${srcUrl}" /></div>`;
-        }
-        if (d.mask_url) {
-          html += `<div class="node-preview" onclick="openLightbox('${d.mask_url}')"><div class="checkerboard"></div><img src="${d.mask_url}" /></div>`;
-        }
-        if (maskUpstreams.length > 1) {
-          html += `<div style="font-size:10px;color:#F87171;padding:3px 5px;background:rgba(239,68,68,0.06);border-radius:4px;text-align:center;">注意：遮罩编辑只使用第一个上游输入，其余被忽略</div>`;
-        }
-        html += `<div style="font-size:11px;color:var(--c-mask_edit);padding:4px 6px;background:rgba(236,72,153,0.06);border-radius:5px;text-align:center;">双击编辑遮罩</div>`;
-        if (maskSrc) {
-          html += `<div style="font-size:9px;color:#94A3B8;padding:2px 4px;text-align:center;">输入来源：${NODE_CFG[maskSrc.type]?.title || maskSrc.type}(${maskSrc.id.slice(0,6)})</div>`;
-        }
-      } else if (node.type === 'seedance_video') {
-        const thumb = d.video_url ? `<video src="${d.video_url}" muted loop class="gen-thumb-video" onclick="event.stopPropagation();openLightbox('${d.video_url}',true)"></video>` : d.image_url ? `<img src="${d.image_url}" onclick="openLightbox('${d.image_url}')" style="cursor:pointer" />` : `<span class="gen-thumb-empty">?</span>`;
-        const prompt = d.prompt || getDefaultVideoPrompt();
-        const channel = d.channel || 'official';
-        const isFirstLast = channel === 'first_last_frame';
-        // 普通模式下，图1强制来自上游连线；首尾帧模式可手动上传或上游注入
-        const upstreams = canvasData.connections.filter(c => c.to === node.id).map(c => canvasData.nodes.find(n => n.id === c.from)).filter(Boolean);
-        const upstream1 = upstreams[0];
-        const upstreamLabel = (n) => n ? `${NODE_CFG[n.type]?.title || n.type}(${n.id.slice(0,6)})` : '无';
-        const frameSlot = (field, label, allowUpload) => `
-          <div style="flex:1;position:relative">
-            <div class="node-label">${label}</div>
-            <div class="ref-upload" ${d[field] ? `onclick="event.stopPropagation();openLightbox('${d[field]}')"` : (allowUpload ? `onclick="document.getElementById('upload-${field}-${node.id}').click()"` : '')}>
-              ${d[field] ? `<img src="${d[field]}" />` : `<span class="ref-upload-empty">${allowUpload ? '+ 上传' : '来自上游'}</span>`}
-            </div>
-            ${d[field] && allowUpload ? `<button class="ref-clear" onclick="event.stopPropagation();clearNodeField('${node.id}','${field}')">&times;</button>` : ''}
-            ${allowUpload ? `<input id="upload-${field}-${node.id}" type="file" accept="image/*" style="display:none" onchange="uploadRefImage('${node.id}','${field}',this)" />` : ''}
-          </div>`;
-        const firstSlot = isFirstLast
-          ? frameSlot('image_url', '图1 · 首帧', true)
-          : (upstream1
-              ? `<div style="flex:1;position:relative"><div class="node-label">图1 · 来自 ${upstreamLabel(upstream1)}</div><div class="ref-upload" onclick="event.stopPropagation();openLightbox('${d.image_url || upstream1.data.image_url}')"><img src="${d.image_url || upstream1.data.image_url || ''}" onerror="this.style.display='none'" /></div></div>`
-              : frameSlot('image_url', '图1 · 首帧（请连线上游）', false));
-        const lastSlot  = frameSlot('image2_url', '图2 · 尾帧（可选）', isFirstLast);
-        html += `
-          <div class="gen-prompt-box">
-            <div class="gen-thumb">${thumb}</div>
-            <div class="gen-textarea-wrap">
-              <textarea placeholder="输入视频描述..." oninput="updateNodeData('${node.id}','prompt',this.value); updateCharCount(this)">${prompt}</textarea>
-              <div class="gen-char-count">${prompt.length} / 2500</div>
-            </div>
-          </div>
-          <div class="gen-toolbar">
-            <select class="gen-model" onchange="updateNodeData('${node.id}','channel',this.value)">
-              <option value="official" ${channel==='official'?'selected':''}>seedance（官方稳定版）</option>
-              <option value="low_cost" ${channel==='low_cost'?'selected':''}>seedance（低价版）</option>
-              <option value="first_last_frame" ${isFirstLast?'selected':''}>seedance（首尾帧）</option>
-            </select>
-            <select class="gen-ratio" onchange="updateNodeData('${node.id}','aspect_ratio',this.value)">
-              <option value="9:16" ${d.aspect_ratio!=='16:9'?'selected':''}>9:16</option>
-              <option value="16:9" ${d.aspect_ratio==='16:9'?'selected':''}>16:9</option>
-              <option value="1:1" ${d.aspect_ratio==='1:1'?'selected':''}>1:1</option>
-              <option value="3:4" ${d.aspect_ratio==='3:4'?'selected':''}>3:4</option>
-              <option value="4:3" ${d.aspect_ratio==='4:3'?'selected':''}>4:3</option>
-              <option value="21:9" ${d.aspect_ratio==='21:9'?'selected':''}>21:9</option>
-            </select>
-            <select class="gen-duration" onchange="updateNodeData('${node.id}','duration',this.value)">
-              <option value="4" ${d.duration==='4'?'selected':''}>4秒</option>
-              <option value="5" ${d.duration==='5'?'selected':''}>5秒</option>
-              <option value="6" ${d.duration==='6'?'selected':''}>6秒</option>
-              <option value="7" ${d.duration==='7'?'selected':''}>7秒</option>
-              <option value="8" ${d.duration==='8'?'selected':''}>8秒</option>
-              <option value="9" ${d.duration==='9'?'selected':''}>9秒</option>
-              <option value="10" ${d.duration==='10'?'selected':''}>10秒</option>
-              <option value="11" ${d.duration==='11'?'selected':''}>11秒</option>
-              <option value="12" ${d.duration==='12'?'selected':''}>12秒</option>
-              <option value="13" ${d.duration==='13'?'selected':''}>13秒</option>
-              <option value="14" ${d.duration==='14'?'selected':''}>14秒</option>
-              <option value="15" ${d.duration==='15'?'selected':''}>15秒</option>
-            </select>
-            ${isFirstLast ? `<select class="gen-ratio" onchange="updateNodeData('${node.id}','resolution',this.value)">
-              <option value="480p" ${d.resolution==='480p'?'selected':''}>480p</option>
-              <option value="720p" ${d.resolution==='720p'?'selected':''}>720p</option>
-              <option value="1080p" ${d.resolution==='1080p'?'selected':''}>1080p</option>
-              <option value="2k" ${d.resolution==='2k'?'selected':''}>2k</option>
-              <option value="4k" ${d.resolution==='4k'?'selected':''}>4k</option>
-            </select>` : ''}
-            <div class="spacer"></div>
-            <div class="cost">≈0.08元</div>
-          </div>
-          <div style="display:flex;gap:5px;margin-top:4px">${firstSlot}${lastSlot}</div>
-          <div style="font-size:9px;color:#94A3B8;padding:2px 4px">首尾帧模式：图1必填，图2可选；普通模式：图1来自上游，忽略图2</div>`;
-      }
-
-      html += `<div class="node-progress-bar"><div class="fill" id="prog-${node.id}" style="width:0%"></div></div>`;
-      if (d._error) html += `<div style="font-size:10px;color:#F87171;padding:3px 5px;background:rgba(239,68,68,0.06);border-radius:4px;">${d._error}</div>`;
-      return html;
+      // 空态
+      const emptyHint = node.type === 'image_input' ? '点击节点上传图片'
+        : node.type === 'gpt_image' ? '点击节点编辑参数并运行'
+        : node.type === 'remove_bg' ? '连线上游后运行'
+        : '点击节点编辑参数';
+      return `<div class="preview-empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5-9 9"/></svg>
+        <span>${NODE_CFG[node.type]?.title || node.type}</span>
+        <span class="empty-hint">${emptyHint}</span>
+      </div>`;
     }
-    function updateNodeData(id, field, val) { const n = canvasData.nodes.find(n=>n.id===id); if(n) n.data[field]=val; autoSave(); }
+    // 预览工具栏（悬浮在预览层右上角）：预览大图 + 下载
+    function buildPreviewTools(url, isVideo=false) {
+      if (!url) return '';
+      const safe = url.replace(/'/g, "\\'");
+      return `<div class="preview-tools">
+        <button class="pv-tool" title="放大预览" onclick="event.stopPropagation();openLightbox('${safe}',${isVideo?'true':'false'})">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/></svg>
+        </button>
+        <button class="pv-tool" title="下载" onclick="event.stopPropagation();downloadAsset('${safe}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </button>
+      </div>`;
+    }
+    // 下载资源
+    function downloadAsset(url) {
+      const a = document.createElement('a');
+      a.href = url;
+      // 提取文件名
+      try {
+        const u = new URL(url, location.origin);
+        const name = u.pathname.split('/').pop() || 'download';
+        a.download = name;
+      } catch(_) { a.download = 'download'; }
+      a.target = '_blank';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    window.downloadAsset = downloadAsset;
+    // 元信息浮层：显示节点关键属性
+    function buildNodeMeta(node) {
+      const d = node.data;
+      const parts = [];
+      if (d._width && d._height) {
+        parts.push(`<span class="meta-val">${d._width}×${d._height}</span>`);
+      }
+      if (node.type === 'gpt_image') {
+        const model = d.model || 'gpt-image-2';
+        parts.push(`<span class="meta-val">${model}</span>`);
+        const size = d.size || d.resolution || '';
+        const ar = d.aspect_ratio || '';
+        if (size) parts.push(`<span class="meta-key">size:</span><span class="meta-val">${size}</span>`);
+        else if (ar) parts.push(`<span class="meta-key">ar:</span><span class="meta-val">${ar}</span>`);
+      } else if (node.type === 'seedance_video') {
+        const channel = d.channel || 'official';
+        const ar = d.aspect_ratio || '9:16';
+        const dur = d.duration || '5';
+        parts.push(`<span class="meta-val">${channel}</span>`);
+        parts.push(`<span class="meta-val">${ar}</span>`);
+        parts.push(`<span class="meta-val">${dur}s</span>`);
+      }
+      if (parts.length === 0) return '&nbsp;';
+      return parts.join('<span class="meta-dot">·</span>');
+    }
+    // 旧 buildNodeBody 已废弃：节点不再内嵌参数栏，所有参数移至底部浮层参数面板
+    function buildNodeBody(_node) { return ''; }
+    function updateNodeData(id, field, val) {
+      const n = canvasData.nodes.find(n=>n.id===id);
+      if (!n) return;
+      n.data[field] = val;
+      autoSave();
+      // 参数变化时同步刷新元信息浮层（如 model / channel / ratio）
+      const el = nodeElements[id];
+      if (el) {
+        const metaEl = el.querySelector('.node-meta-float');
+        if (metaEl) metaEl.innerHTML = buildNodeMeta(n);
+      }
+    }
     function migrateNodeData(node) {
       const legacyModelByType = {
         rh_gpt_image_i2i: 'rh_gpt_image_i2i',
@@ -546,12 +573,8 @@
       if (!cfg.aspectRatios.includes(node.data.aspect_ratio)) node.data.aspect_ratio = cfg.defaultAspect;
     }
     function refreshNodeBody(nodeId) {
-      const node = canvasData.nodes.find(n => n.id === nodeId);
-      if (!node) return;
-      const el = nodeElements[nodeId];
-      if (!el) return;
-      el.querySelector('.node-body').innerHTML = buildNodeBody(node);
-      bindNodeEvents(el, node);
+      // 新架构：不再有内嵌 body，改为刷新预览层 + 元信息 + 参数面板
+      refreshNodePreview(nodeId);
       autoSave();
     }
     function setNodeModel(nodeId, model) {
@@ -595,9 +618,14 @@
     function refreshNodePreview(id) {
       const node = canvasData.nodes.find(n=>n.id===id); if(!node) return;
       const el = nodeElements[id]; if(!el) return;
-      el.querySelector('.node-body').innerHTML = buildNodeBody(node);
-      const ta = el.querySelector('textarea');
-      if (ta) { setTimeout(() => { updateCharCount(ta); }, 0); }
+      // 更新预览层
+      const previewEl = el.querySelector('.node-preview-layer');
+      if (previewEl) previewEl.innerHTML = buildNodePreview(node);
+      // 更新元信息
+      const metaEl = el.querySelector('.node-meta-float');
+      if (metaEl) metaEl.innerHTML = buildNodeMeta(node);
+      // 如果当前参数面板打开的是本节点，同步刷新面板
+      if (paramsPanelNodeId === id) renderParamsPanel();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -630,6 +658,7 @@
       node.data[field] = '';
       refreshNodePreview(nodeId);
       autoSave();
+      if (paramsPanelNodeId === nodeId) renderParamsPanel();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -645,11 +674,10 @@
     function openMaskEditor(nodeId) {
       const node = canvasData.nodes.find(n => n.id === nodeId);
       if (!node) return;
-      const upstreamConn = canvasData.connections.find(c => c.to === nodeId);
       let imageUrl = node.data.image_url;
-      if (!imageUrl && upstreamConn) {
-        const upstreamNode = canvasData.nodes.find(n => n.id === upstreamConn.from);
-        if (upstreamNode) imageUrl = upstreamNode.data.image_url;
+      if (!imageUrl) {
+        const up = getUpstreamByPort(nodeId, 'image');
+        if (up) imageUrl = (nodeRuntime[up.node.id]?.image_url) || up.node.data.image_url;
       }
       if (!imageUrl) { alert('请先连线上游图片输入节点'); return; }
       maskEditorNodeId = nodeId;
@@ -811,6 +839,12 @@
     // ═══════════════════════════════════════════════════════════════
     // 连线渲染（SVG 贝塞尔曲线）
     // ═══════════════════════════════════════════════════════════════
+    function getDefaultPortName(nodeType, dir) {
+      const ports = NODE_PORTS[nodeType];
+      if (!ports) return null;
+      const list = dir === 'out' ? ports.outputs : ports.inputs;
+      return list && list.length ? list[0].name : null;
+    }
     function renderConnections() {
       const svg = document.getElementById('svg-layer');
       const temp = svg.querySelector('.conn-temp');
@@ -822,18 +856,25 @@
         if (!fn || !tn) continue;
         const fe = nodeElements[conn.from], te = nodeElements[conn.to];
         if (!fe || !te) continue;
-        const x1 = fn.x + fe.offsetWidth, y1 = fn.y + fe.offsetHeight/2;
-        const x2 = tn.x, y2 = tn.y + te.offsetHeight/2;
-        const dx = Math.max(40, Math.abs(x2-x1)*0.35);
-        const p = `M ${x1} ${y1} C ${x1+dx} ${y1}, ${x2-dx} ${y2}, ${x2} ${y2}`;
+        // 兼容旧数据：无 fromField/toField 时取默认第一个端口
+        const fromField = conn.fromField || getDefaultPortName(fn.type, 'out');
+        const toField = conn.toField || getDefaultPortName(tn.type, 'in');
+        const fromPort = fromField ? fe.querySelector(`.port-out[data-portname="${fromField}"]`) : null;
+        const toPort = toField ? te.querySelector(`.port-in[data-portname="${toField}"]`) : null;
+        const start = getPortCenter(fn, fe, fromPort, 'out');
+        const end = getPortCenter(tn, te, toPort, 'in');
+        const dx = Math.max(60, Math.abs(end.x-start.x)*0.45);
+        const p = `M ${start.x} ${start.y} C ${start.x+dx} ${start.y}, ${end.x-dx} ${end.y}, ${end.x} ${end.y}`;
         const el = document.createElementNS('http://www.w3.org/2000/svg','path');
         el.setAttribute('d', p);
         let cls = 'conn-path';
         if (selectedConn === conn.id) cls += ' selected';
-        // 运行中的连线动画
-        if (currentCanvasId) {
-          const rec = pollTimers[conn.from];
-          if (rec) cls += ' running';
+        // 根据上游节点运行状态自动着色
+        const fromRt = nodeRuntime[conn.from];
+        if (fromRt) {
+          if (fromRt.status === 'running' || fromRt.status === 'pending') cls += ' running';
+          else if (fromRt.status === 'success') cls += ' success';
+          else if (fromRt.status === 'failed' || fromRt.status === 'blocked' || fromRt.status === 'interrupted') cls += ' failed';
         }
         el.setAttribute('class', cls);
         el.dataset.connId = conn.id;
@@ -847,8 +888,9 @@
     // 节点交互
     // ═══════════════════════════════════════════════════════════════
     function bindNodeEvents(el, node) {
-      const header = el.querySelector('.node-header');
-      header.addEventListener('mousedown', (e) => {
+      const dragHandle = el.querySelector('.node-title-float');
+      if (dragHandle) {
+        dragHandle.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
         e.stopPropagation();
         if (e.shiftKey) { toggleNodeBoxSelection(node.id); return; }
@@ -867,6 +909,8 @@
           el.style.left = node.x+'px'; el.style.top = node.y+'px';
           const aff = canvasData.connections.filter(c=>c.from===node.id||c.to===node.id);
           if (aff.length) renderConnections();
+          // 参数面板跟随当前拖拽节点
+          if (paramsPanelNodeId === node.id) positionParamsPanel();
         }
         function up() {
           el.classList.remove('dragging');
@@ -882,16 +926,20 @@
         }
         document.addEventListener('mousemove', mv);
         document.addEventListener('mouseup', up);
-      });
-      const outPort = el.querySelector('.port-out');
-      if (outPort) {
-        outPort.addEventListener('mousedown', (e) => {
-          e.stopPropagation(); e.preventDefault();
-          isConnecting = true; connStart = node.id;
         });
       }
+      const outPorts = el.querySelectorAll('.port-out');
+      outPorts.forEach(p => {
+        p.addEventListener('mousedown', (e) => {
+          e.stopPropagation(); e.preventDefault();
+          isConnecting = true;
+          connStart = { nodeId: node.id, portName: p.dataset.portname };
+        });
+      });
+      // 节点主体点击：选中 + 打开参数面板
       el.addEventListener('mousedown', (e) => {
-        if (e.target.classList.contains('port') || e.target.closest('.node-header')) return;
+        if (e.target.classList.contains('port') || e.target.closest('.node-title-float')) return;
+        if (e.target.closest('.node-delete') || e.target.closest('.pv-tool')) return;  // 删除/预览工具按钮
         if (e.shiftKey) { e.stopPropagation(); e.preventDefault(); toggleNodeBoxSelection(node.id); return; }
         selectedNode = node.id;
         clearBoxSelection();
@@ -899,13 +947,507 @@
         document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
         el.classList.add('selected');
       });
-      if (node.type === 'mask_edit') {
-        el.addEventListener('dblclick', (e) => {
+      // 单击（不拖拽时）：打开参数面板
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.port') || e.target.closest('.node-delete')) return;
+        if (e.target.closest('.pv-tool')) return;   // 预览工具栏点击不弹参数面板
+        openParamsPanel(node.id);
+      });
+      // 双击：打开参数面板并聚焦第一个字段（mask_edit 特殊 → 遮罩编辑器）
+      el.addEventListener('dblclick', (e) => {
+        if (e.target.closest('.port') || e.target.closest('.node-delete') || e.target.closest('.pv-tool')) return;
+        if (node.type === 'mask_edit') {
           e.stopPropagation();
           openMaskEditor(node.id);
-        });
+        } else {
+          openParamsPanel(node.id, true);
+        }
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 底部浮层参数面板（点击节点弹出，Figma / VSCode 风格）
+    // ═══════════════════════════════════════════════════════════════
+    let paramsPanelNodeId = null;
+    let paramsPanelEl = null;
+
+    function ensureParamsPanel() {
+      if (paramsPanelEl) return paramsPanelEl;
+      paramsPanelEl = document.createElement('div');
+      paramsPanelEl.id = 'node-params-panel';
+      // 挂到 body，避免受 workspace transform/scale 影响，保证 select 下拉正常
+      document.body.appendChild(paramsPanelEl);
+      return paramsPanelEl;
+    }
+
+    // 计算并应用参数面板的位置：贴在目标节点卡片下方
+    function positionParamsPanel() {
+      if (!paramsPanelEl || !paramsPanelNodeId) return;
+      const el = nodeElements[paramsPanelNodeId];
+      if (!el) return;
+      // 面板挂到 body，位置使用节点在视口中的实际坐标
+      const rect = el.getBoundingClientRect();
+      const gap = 18;
+      paramsPanelEl.style.left = (rect.left + rect.width / 2 - 260) + 'px';   // 面板宽 520，居中于节点
+      paramsPanelEl.style.top  = (rect.bottom + gap) + 'px';
+    }
+
+    function openParamsPanel(nodeId, focusFirst=false) {
+      const node = canvasData.nodes.find(n => n.id === nodeId);
+      if (!node) return;
+      paramsPanelNodeId = nodeId;
+      const panel = ensureParamsPanel();
+      renderParamsPanel();
+      positionParamsPanel();
+      panel.classList.add('open');
+      if (focusFirst) {
+        setTimeout(() => {
+          const first = panel.querySelector('textarea, input[type="text"], select');
+          if (first) first.focus();
+        }, 240);
       }
     }
+
+    function closeParamsPanel() {
+      if (paramsPanelEl) paramsPanelEl.classList.remove('open');
+      paramsPanelNodeId = null;
+    }
+
+    function togglePpGroup(headerEl) {
+      const g = headerEl.closest('.pp-group');
+      if (g) g.classList.toggle('collapsed');
+    }
+    window.togglePpGroup = togglePpGroup;
+    window.openParamsPanel = openParamsPanel;
+    window.closeParamsPanel = closeParamsPanel;
+
+    // 渲染当前 paramsPanelNodeId 对应节点的参数
+    function renderParamsPanel() {
+      if (!paramsPanelEl || !paramsPanelNodeId) return;
+      const node = canvasData.nodes.find(n => n.id === paramsPanelNodeId);
+      if (!node) { closeParamsPanel(); return; }
+      const cfg = NODE_CFG[node.type] || { icon: null, title: node.type, color: '#666' };
+      paramsPanelEl.style.setProperty('--node-color', cfg.color);
+      const iconSvg = cfg.icon ? `<svg><use href="#icon-${cfg.icon}"/></svg>` : '';
+      const rt = nodeRuntime[node.id] || {};
+      const status = rt.status || 'idle';
+      const statusLabel = STATUS_LABELS[status] || '待机';
+      paramsPanelEl.innerHTML = `
+        <div class="pp-header">
+          <span class="pp-title">
+            <span class="pp-icon">${iconSvg}</span>
+            ${cfg.title}
+          </span>
+          <span class="pp-subtitle">#${node.id.slice(0,6)} · ${statusLabel}</span>
+          <div class="pp-actions">
+            <button class="pp-btn primary" onclick="runNodeFromPanel('${node.id}')">▶ 运行</button>
+            <button class="pp-btn" onclick="closeParamsPanel()" title="关闭 (Esc)">✕</button>
+          </div>
+        </div>
+        ${status === 'failed' && node.data._error ? `
+        <div class="pp-error-bar">
+          <span class="pp-error-code">${(node.data._error.match(/^\[([A-Z]\d+)\]/) || ['','E999'])[1]}</span>
+          <span class="pp-error-msg">${node.data._error.replace(/^\[[A-Z]\d+\]\s*/, '')}</span>
+        </div>` : ''}
+        <div class="pp-body">${renderParamsBody(node)}</div>
+      `;
+      // 绑定拖动整个面板（点击顶部标题栏）
+      const header = paramsPanelEl.querySelector('.pp-header');
+      if (header) {
+        header.addEventListener('mousedown', panelDragStart);
+      }
+    }
+
+    // 面板拖动
+    function panelDragStart(e) {
+      if (e.target.closest('button')) return;   // 点按钮不触发拖动
+      if (!paramsPanelEl) return;
+      e.stopPropagation();
+      const startX = e.clientX, startY = e.clientY;
+      const rect = paramsPanelEl.getBoundingClientRect();
+      // 用当前 style.left/top 计算基准
+      const baseLeft = parseFloat(paramsPanelEl.style.left) || 0;
+      const baseTop = parseFloat(paramsPanelEl.style.top) || 0;
+      function mv(ev) {
+        paramsPanelEl.style.left = (baseLeft + (ev.clientX - startX)) + 'px';
+        paramsPanelEl.style.top  = (baseTop  + (ev.clientY - startY)) + 'px';
+      }
+      function up() {
+        document.removeEventListener('mousemove', mv);
+        document.removeEventListener('mouseup', up);
+      }
+      document.addEventListener('mousemove', mv);
+      document.addEventListener('mouseup', up);
+    }
+
+    // 按节点类型渲染参数字段
+    function renderParamsBody(node) {
+      const d = node.data;
+      if (node.type === 'image_input') return ppImageInputBody(node);
+      if (node.type === 'gpt_image') return ppGptImageBody(node);
+      if (node.type === 'remove_bg') return ppRemoveBgBody(node);
+      if (node.type === 'mask_edit') return ppMaskEditBody(node);
+      if (node.type === 'seedance_video') return ppSeedanceBody(node);
+      return `<div class="pp-field span-3"><span class="pp-hint">该节点暂无可配置参数</span></div>`;
+    }
+
+    // ── image_input ──
+    function ppImageInputBody(node) {
+      const d = node.data;
+      const nid = node.id;
+      return `
+        <div class="pp-field span-3">
+          <div class="pp-label">图片</div>
+          <div class="pp-refs">
+            <div class="pp-ref-slot ${d.image_url ? 'filled' : ''}"
+                 onclick="${d.image_url ? `openLightbox('${d.image_url}')` : `document.getElementById('pp-upload-${nid}').click()`}">
+              <div class="pp-ref-label">图片</div>
+              ${d.image_url
+                ? `<img src="${d.image_url}"/><button class="pp-ref-clear" onclick="event.stopPropagation();clearNodeField('${nid}','image_url')">✕</button>`
+                : `<div class="pp-ref-empty">＋ 上传图片</div>`}
+            </div>
+          </div>
+          <input id="pp-upload-${nid}" type="file" accept="image/*" style="display:none"
+                 onchange="uploadImage('${nid}',this)"/>
+          <div class="pp-hint">上传的图片会作为下游节点的输入</div>
+        </div>`;
+    }
+
+    // ── remove_bg ──
+    function ppRemoveBgBody(_node) {
+      return `<div class="pp-field span-3"><span class="pp-hint">此节点无需配置参数。连线上游后点击运行即可去除背景。</span></div>`;
+    }
+
+    // ── mask_edit ──
+    function ppMaskEditBody(node) {
+      const nid = node.id;
+      const d = node.data;
+      const mode = d.mask_mode || 'auto_face';
+      const expand = d.expand ?? 0.25;
+      const faceIndex = d.face_index ?? -1;
+      const detectMethod = d.detect_method || 'auto';
+      const up = getUpstreamByPort(nid, 'image');
+      const baseUrl = d.image_url || (up && ((nodeRuntime[up.node.id]?.image_url) || up.node.data.image_url)) || '';
+      const upHint = up ? `底图来自上游 ${NODE_CFG[up.node.type]?.title || up.node.type}` : (baseUrl ? '底图来自手动上传' : '请先连线上游图片节点');
+      const modeHint = {
+        auto_face: '自动检测人脸并生成遮罩（默认）',
+        auto_full: '生成全图保留遮罩（不遮脸）',
+        manual: '手动绘制遮罩，双击节点打开编辑器'
+      }[mode];
+      const faceIndexOptions = [
+        { value: -1, label: '全部人脸' },
+        { value: 0, label: '最大人脸（0）' },
+        { value: 1, label: '第二人脸（1）' },
+        { value: 2, label: '第三人脸（2）' },
+      ].map(o => `<option value="${o.value}" ${faceIndex==o.value?'selected':''}>${o.label}</option>`).join('');
+      return `
+        <div class="pp-field span-2">
+          <div class="pp-label">遮罩模式</div>
+          <select onchange="updateNodeData('${nid}','mask_mode',this.value); renderParamsPanel()">
+            <option value="auto_face" ${mode==='auto_face'?'selected':''}>自动人脸遮罩</option>
+            <option value="auto_full" ${mode==='auto_full'?'selected':''}>自动全图遮罩</option>
+            <option value="manual" ${mode==='manual'?'selected':''}>手动绘制</option>
+          </select>
+          <div class="pp-hint">${modeHint}</div>
+          ${mode === 'manual' ? `<button class="pp-btn primary" style="width:fit-content;margin-top:8px" onclick="openMaskEditor('${nid}')">
+            ${d.mask_url ? '✎ 重新绘制遮罩' : '＋ 开始绘制遮罩'}
+          </button>` : ''}
+          <div class="pp-hint" style="margin-top:6px">${upHint}</div>
+        </div>
+        ${mode === 'auto_face' ? `
+        <div class="pp-field">
+          <div class="pp-label">检测模型</div>
+          <select onchange="updateNodeData('${nid}','detect_method',this.value)">
+            <option value="auto" ${detectMethod==='auto'?'selected':''}>自动级联（推荐）</option>
+            <option value="opencv_yunet" ${detectMethod==='opencv_yunet'?'selected':''}>YuNet（真实照片）</option>
+            <option value="opencv_haar" ${detectMethod==='opencv_haar'?'selected':''}>Haar（无需模型）</option>
+          </select>
+          <div class="pp-hint">自动级联优先用 YuNet，失败再用 Haar</div>
+        </div>
+        <div class="pp-field">
+          <div class="pp-label">扩展系数</div>
+          <input type="range" min="0" max="0.8" step="0.05" value="${expand}"
+                 onchange="updateNodeData('${nid}','expand',parseFloat(this.value)); this.nextElementSibling.textContent=this.value">
+          <div class="pp-hint">当前值：${expand}（越大遮罩覆盖越多）</div>
+        </div>
+        <div class="pp-field">
+          <div class="pp-label">目标人脸</div>
+          <select onchange="updateNodeData('${nid}','face_index',parseInt(this.value))">
+            ${faceIndexOptions}
+          </select>
+          <div class="pp-hint">多人脸时选择指定人脸，默认全部</div>
+        </div>` : ''}
+        <div class="pp-field">
+          <div class="pp-label">当前遮罩</div>
+          <div class="pp-refs">
+            <div class="pp-ref-slot readonly ${d.mask_url ? 'filled' : ''}"
+                 ${d.mask_url ? `onclick="openLightbox('${d.mask_url}')"` : ''}>
+              <div class="pp-ref-label">mask</div>
+              ${d.mask_url ? `<img src="${d.mask_url}"/>` : `<div class="pp-ref-empty">未生成</div>`}
+            </div>
+          </div>
+        </div>`;
+    }
+
+    // ── gpt_image ──
+    function ppGptImageBody(node) {
+      const d = node.data;
+      const nid = node.id;
+      const model = d.model || 'gpt-image-2';
+      const cfg = AI_IMAGE_MODEL_CFG[model] || AI_IMAGE_MODEL_CFG['gpt-image-2'];
+      const isGpt2 = model === 'gpt-image-2';
+      const prompt = d.prompt || getDefaultImagePrompt();
+      const modelOpts = Object.entries(AI_IMAGE_MODEL_CFG).map(([k,v]) =>
+        `<option value="${k}" ${k===model?'selected':''}>${v.label}</option>`).join('');
+      const sizeOpts = (cfg.sizes || []).map(s =>
+        `<option value="${s}" ${s===(d.size||cfg.defaultSize)?'selected':''}>${s}</option>`).join('');
+      const arOpts = (cfg.aspectRatios || []).map(a =>
+        `<option value="${a}" ${a===(d.aspect_ratio||cfg.defaultAspect)?'selected':''}>${a}</option>`).join('');
+      const resOpts = (cfg.resolutions || []).map(r =>
+        `<option value="${r}" ${r===(d.resolution||cfg.defaultRes)?'selected':''}>${r}</option>`).join('');
+
+      // 上游图1（image1 端口，只读）
+      const up1 = getUpstreamByPort(nid, 'image1');
+      let img1Url = '';
+      if (up1) {
+        img1Url = (nodeRuntime[up1.node.id]?.image_url) || up1.node.data.image_url || '';
+      }
+      if (!img1Url) img1Url = d.image1 || d.image_url || '';
+
+      // 上游图2（image2 端口，只读）
+      const up2 = getUpstreamByPort(nid, 'image2');
+      let img2Url = '';
+      if (up2) {
+        img2Url = (nodeRuntime[up2.node.id]?.image_url) || up2.node.data.image_url || '';
+      }
+      if (!img2Url) img2Url = d.image2 || d.image2_url || '';
+
+      // 参考图槽位列表（根据模型定义）
+      const refDefs = (() => {
+        if (model === 'gpt-image-2') return [
+          { field:'__upstream', label:'图1 · 主体(上游)', readonly:true, url: img1Url },
+          { field:'hair_url', label:'图2 · 发型' },
+          { field:'clothing_url', label:'图3 · 服装' }
+        ];
+        if (model === 'rh_gpt_image_i2i') return [
+          { field:'__upstream', label:'图1 · 主体(上游)', readonly:true, url: img1Url },
+          { field:'image2_url', label:'图2 · 参考图', readonly:true, url: img2Url },
+          { field:'image2', label:'图2 · 手动参考' }
+        ];
+        if (model === 'nano_banana_2') return [
+          { field:'__upstream', label:'图1 · 主体(上游)', readonly:true, url: img1Url },
+          { field:'image2_url', label:'图2(上游)', readonly:true, url: img2Url },
+          { field:'image2', label:'图2 · 手动' },
+          { field:'image3_url', label:'图3 · 手动' },
+          { field:'image4_url', label:'图4 · 手动' }
+        ];
+        return [{ field:'__upstream', label:'图1 · 上游', readonly:true, url: img1Url }];
+      })();
+
+      const refsHtml = refDefs.map(r => {
+        const url = r.readonly ? r.url : d[r.field];
+        const filled = !!url;
+        if (r.readonly) {
+          return `<div class="pp-ref-slot readonly ${filled?'filled':''}"
+                       ${url ? `onclick="openLightbox('${url}')"` : ''}>
+            <div class="pp-ref-label">${r.label}</div>
+            ${url ? `<img src="${url}"/>` : `<div class="pp-ref-empty">来自上游</div>`}
+          </div>`;
+        }
+        return `<div class="pp-ref-slot ${filled?'filled':''}"
+                     onclick="${filled ? `openLightbox('${url}')` : `document.getElementById('pp-up-${r.field}-${nid}').click()`}">
+          <div class="pp-ref-label">${r.label}</div>
+          ${filled
+            ? `<img src="${url}"/><button class="pp-ref-clear" onclick="event.stopPropagation();clearNodeField('${nid}','${r.field}')">✕</button>`
+            : `<div class="pp-ref-empty">＋ 上传</div>`}
+          <input id="pp-up-${r.field}-${nid}" type="file" accept="image/*" style="display:none"
+                 onchange="uploadRefImage('${nid}','${r.field}',this)"/>
+        </div>`;
+      }).join('');
+
+      const sizeField = isGpt2
+        ? `<div class="pp-field">
+             <div class="pp-label">尺寸 (size)</div>
+             <select onchange="updateNodeData('${nid}','size',this.value)">${sizeOpts}</select>
+           </div>`
+        : `<div class="pp-field">
+             <div class="pp-label">比例 (aspect ratio)</div>
+             <select onchange="updateNodeData('${nid}','aspect_ratio',this.value)">${arOpts}</select>
+           </div>
+           <div class="pp-field">
+             <div class="pp-label">分辨率 (resolution)</div>
+             <select onchange="updateNodeData('${nid}','resolution',this.value)">${resOpts}</select>
+           </div>`;
+
+      return `
+        <div class="pp-field span-2">
+          <div class="pp-label">提示词 · Prompt</div>
+          <textarea placeholder="输入提示词..." oninput="updateNodeData('${nid}','prompt',this.value)">${prompt}</textarea>
+          <div class="pp-hint">${cfg.cost || ''}</div>
+        </div>
+        <div class="pp-field">
+          <div class="pp-label">模型</div>
+          <select onchange="setNodeModelFromPanel('${nid}',this.value)">${modelOpts}</select>
+        </div>
+        ${sizeField}
+        <div class="pp-field span-3">
+          <div class="pp-label">参考图</div>
+          <div class="pp-refs">${refsHtml}</div>
+        </div>
+        <div class="pp-field span-3" style="flex-direction:row;gap:8px;">
+          <button class="pp-btn" onclick="polishPrompt('${nid}')">✨ 润色</button>
+        </div>`;
+    }
+
+    // ── seedance_video ──
+    function ppSeedanceBody(node) {
+      const d = node.data;
+      const nid = node.id;
+      const channel = d.channel || 'official';
+      const isFirstLast = channel === 'first_last_frame';
+      const prompt = d.prompt || getDefaultVideoPrompt();
+
+      // 首帧端口 first_frame：优先上游，其次手动值
+      const upFirst = getUpstreamByPort(nid, 'first_frame');
+      let firstFrameUrl = d.first_frame || d.image_url || '';
+      let firstFromUpstream = false;
+      if (upFirst) {
+        const upUrl = (nodeRuntime[upFirst.node.id]?.image_url) || upFirst.node.data.image_url;
+        if (upUrl) { firstFrameUrl = upUrl; firstFromUpstream = true; }
+      }
+
+      // 尾帧端口 last_frame：仅首尾帧模式有效
+      const upLast = isFirstLast ? getUpstreamByPort(nid, 'last_frame') : null;
+      let lastFrameUrl = d.last_frame || d.image2_url || '';
+      let lastFromUpstream = false;
+      if (upLast) {
+        const upUrl = (nodeRuntime[upLast.node.id]?.image_url) || upLast.node.data.image_url;
+        if (upUrl) { lastFrameUrl = upUrl; lastFromUpstream = true; }
+      }
+
+      const ar = d.aspect_ratio || '9:16';
+      const dur = d.duration || '5';
+      const res = d.resolution || '480p';
+
+      const arOpts = ['9:16','16:9','1:1','3:4','4:3','21:9'].map(a =>
+        `<option value="${a}" ${a===ar?'selected':''}>${a}</option>`).join('');
+      const durOpts = ['4','5','6','7','8','9','10','11','12','13','14','15'].map(x =>
+        `<option value="${x}" ${x===dur?'selected':''}>${x} 秒</option>`).join('');
+      const resOpts = ['480p','720p','1080p','2k','4k'].map(r =>
+        `<option value="${r}" ${r===res?'selected':''}>${r}</option>`).join('');
+
+      // 首帧槽位
+      const firstReadonly = !isFirstLast || firstFromUpstream;
+      const firstLabel = firstFromUpstream ? `图1 · 首帧（来自 ${NODE_CFG[upFirst.node.type]?.title || upFirst.node.type}）` : '图1 · 首帧';
+      const firstSlot = firstReadonly
+        ? `<div class="pp-ref-slot readonly ${firstFrameUrl?'filled':''}"
+               ${firstFrameUrl ? `onclick="openLightbox('${firstFrameUrl}')"` : ''}>
+             <div class="pp-ref-label">${firstLabel}</div>
+             ${firstFrameUrl ? `<img src="${firstFrameUrl}"/>` : `<div class="pp-ref-empty">${firstFromUpstream ? '' : '请连线上游'}</div>`}
+           </div>`
+        : `<div class="pp-ref-slot ${firstFrameUrl?'filled':''}"
+               onclick="${firstFrameUrl ? `openLightbox('${firstFrameUrl}')` : `document.getElementById('pp-first-${nid}').click()`}">
+             <div class="pp-ref-label">${firstLabel}</div>
+             ${firstFrameUrl
+               ? `<img src="${firstFrameUrl}"/><button class="pp-ref-clear" onclick="event.stopPropagation();clearNodeField('${nid}','first_frame')">✕</button>`
+               : `<div class="pp-ref-empty">＋ 上传首帧</div>`}
+             <input id="pp-first-${nid}" type="file" accept="image/*" style="display:none"
+                    onchange="uploadRefImage('${nid}','first_frame',this)"/>
+           </div>`;
+
+      // 尾帧槽位（仅首尾帧模式可编辑）
+      const lastSlot = isFirstLast
+        ? (lastFromUpstream
+            ? `<div class="pp-ref-slot readonly ${lastFrameUrl?'filled':''}"
+                   ${lastFrameUrl ? `onclick="openLightbox('${lastFrameUrl}')"` : ''}>
+                 <div class="pp-ref-label">图2 · 尾帧（来自 ${NODE_CFG[upLast.node.type]?.title || upLast.node.type}）</div>
+                 ${lastFrameUrl ? `<img src="${lastFrameUrl}"/>` : `<div class="pp-ref-empty"></div>`}
+               </div>`
+            : `<div class="pp-ref-slot ${lastFrameUrl?'filled':''}"
+                   onclick="${lastFrameUrl ? `openLightbox('${lastFrameUrl}')` : `document.getElementById('pp-last-${nid}').click()`}">
+                 <div class="pp-ref-label">图2 · 尾帧（可选）</div>
+                 ${lastFrameUrl
+                   ? `<img src="${lastFrameUrl}"/><button class="pp-ref-clear" onclick="event.stopPropagation();clearNodeField('${nid}','last_frame')">✕</button>`
+                   : `<div class="pp-ref-empty">＋ 上传尾帧</div>`}
+                 <input id="pp-last-${nid}" type="file" accept="image/*" style="display:none"
+                        onchange="uploadRefImage('${nid}','last_frame',this)"/>
+               </div>`)
+        : `<div class="pp-ref-slot readonly">
+             <div class="pp-ref-label">图2</div>
+             <div class="pp-ref-empty">普通模式下忽略</div>
+           </div>`;
+
+      return `
+        <div class="pp-field span-2">
+          <div class="pp-label">提示词 · Video Prompt</div>
+          <textarea placeholder="描述视频内容..." oninput="updateNodeData('${nid}','prompt',this.value)">${prompt}</textarea>
+          <div class="pp-hint">支持镜头、动作、光线、字幕等描述</div>
+        </div>
+        <div class="pp-field">
+          <div class="pp-label">渠道 (channel)</div>
+          <select onchange="updateNodeData('${nid}','channel',this.value); renderParamsPanel()">
+            <option value="official" ${channel==='official'?'selected':''}>seedance 官方稳定版</option>
+            <option value="low_cost" ${channel==='low_cost'?'selected':''}>seedance 低价版</option>
+            <option value="first_last_frame" ${isFirstLast?'selected':''}>seedance 首尾帧</option>
+          </select>
+        </div>
+        <div class="pp-field">
+          <div class="pp-label">比例</div>
+          <select onchange="updateNodeData('${nid}','aspect_ratio',this.value)">${arOpts}</select>
+        </div>
+        <div class="pp-field">
+          <div class="pp-label">时长</div>
+          <select onchange="updateNodeData('${nid}','duration',this.value)">${durOpts}</select>
+        </div>
+        ${isFirstLast ? `
+        <div class="pp-field">
+          <div class="pp-label">分辨率</div>
+          <select onchange="updateNodeData('${nid}','resolution',this.value)">${resOpts}</select>
+        </div>` : ''}
+        <div class="pp-field span-3">
+          <div class="pp-label">首尾帧</div>
+          <div class="pp-refs" style="grid-template-columns:repeat(2,minmax(140px,1fr));max-width:400px;">
+            ${firstSlot}${lastSlot}
+          </div>
+          <div class="pp-hint">${isFirstLast ? '首尾帧模式：图1必填，图2可选（尾帧）' : '普通模式：图1来自上游连线，图2被忽略'}</div>
+        </div>`;
+    }
+
+    // 从参数面板切换模型（需要走 setNodeModel 保证参数迁移）
+    function setNodeModelFromPanel(nodeId, model) {
+      setNodeModel(nodeId, model);
+      renderParamsPanel();
+    }
+    window.setNodeModelFromPanel = setNodeModelFromPanel;
+
+    // 从参数面板直接运行节点
+    function runNodeFromPanel(nodeId) {
+      selectedNode = nodeId;
+      document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
+      const el = nodeElements[nodeId];
+      if (el) el.classList.add('selected');
+      updateRunSelectedBtn();
+      if (typeof runSelected === 'function') runSelected();
+    }
+    window.runNodeFromPanel = runNodeFromPanel;
+
+    // ESC 关闭面板
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && paramsPanelNodeId) {
+        // 但不打断遮罩编辑器等
+        if (document.getElementById('mask-editor')?.classList.contains('open')) return;
+        closeParamsPanel();
+      }
+    });
+
+    // 点击画布空白：关闭参数面板 + 清除选中
+    document.addEventListener('mousedown', (e) => {
+      // 只在 viewport 空白处触发
+      if (e.target.id !== 'viewport' && e.target.id !== 'workspace') return;
+      // 不要影响框选/平移
+      if (e.button !== 0) return;
+      if (paramsPanelNodeId) closeParamsPanel();
+    });
 
     // ─── 框选多选辅助 ───
     function toggleNodeBoxSelection(id) {
@@ -1047,7 +1589,7 @@
         // 复制内部连线
         for (const c of clipboardGraph.connections) {
           if (idMap[c.from] && idMap[c.to]) {
-            canvasData.connections.push({ id: uid(), from: idMap[c.from], to: idMap[c.to] });
+            canvasData.connections.push({ id: uid(), from: idMap[c.from], to: idMap[c.to], fromField: c.fromField, toField: c.toField });
           }
         }
         // 选中新复制的节点
@@ -1154,29 +1696,55 @@
         applyTransform(); return;
       }
       if (isConnecting && connStart) {
-        const fn = canvasData.nodes.find(n=>n.id===connStart);
-        const fe = nodeElements[connStart];
+        const fn = canvasData.nodes.find(n=>n.id===connStart.nodeId);
+        const fe = nodeElements[connStart.nodeId];
         if (!fn || !fe) return;
-        const x1 = fn.x+fe.offsetWidth, y1 = fn.y+fe.offsetHeight/2;
+        const startPort = fe.querySelector(`.port-out[data-portname="${connStart.portName}"]`);
+        const startPos = getPortCenter(fn, fe, startPort, 'out');
         const r = viewport.getBoundingClientRect();
         const c = screenToCanvas(e.clientX-r.left, e.clientY-r.top);
-        const dx = Math.max(40, Math.abs(c.x-x1)*0.35);
-        const p = `M ${x1} ${y1} C ${x1+dx} ${y1}, ${c.x-dx} ${c.y}, ${c.x} ${c.y}`;
+        const dx = Math.max(40, Math.abs(c.x-startPos.x)*0.35);
+        const p = `M ${startPos.x} ${startPos.y} C ${startPos.x+dx} ${startPos.y}, ${c.x-dx} ${c.y}, ${c.x} ${c.y}`;
         let t = document.getElementById('svg-layer').querySelector('.conn-temp');
         if (!t) { t = document.createElementNS('http://www.w3.org/2000/svg','path'); t.setAttribute('class','conn-temp'); document.getElementById('svg-layer').appendChild(t); }
         t.setAttribute('d', p);
       }
     });
+    // 计算端口在 canvas 坐标系中的中心点
+    function getPortCenter(node, el, portEl, dir) {
+      if (!portEl) {
+        // 无指定端口：取左侧/右侧中点
+        return dir === 'out'
+          ? { x: node.x + el.offsetWidth, y: node.y + el.offsetHeight / 2 }
+          : { x: node.x, y: node.y + el.offsetHeight / 2 };
+      }
+      const portIndex = parseInt(portEl.style.getPropertyValue('--port-index') || '0', 10);
+      const portCount = parseInt(portEl.style.getPropertyValue('--port-count') || '1', 10);
+      const topPct = 0.18 + portIndex * (0.64 / Math.max(portCount - 1, 1));
+      const y = node.y + el.offsetHeight * topPct;
+      return dir === 'out'
+        ? { x: node.x + el.offsetWidth, y }
+        : { x: node.x, y };
+    }
+
     document.addEventListener('mouseup', (e) => {
       if (isConnecting && connStart) {
         const t = document.elementFromPoint(e.clientX, e.clientY);
         if (t && t.classList.contains('port-in')) {
           const tn = t.closest('.node');
-          if (tn && tn.dataset.id !== connStart) {
+          if (tn && tn.dataset.id !== connStart.nodeId) {
             const id = tn.dataset.id;
-            if (!canvasData.connections.some(c=>c.from===connStart&&c.to===id)) {
+            const toField = t.dataset.portname;
+            const fromField = connStart.portName;
+            if (!canvasData.connections.some(c=>c.from===connStart.nodeId&&c.to===id&&c.toField===toField)) {
               pushHistory();
-              canvasData.connections.push({ id: uid(), from: connStart, to: id });
+              canvasData.connections.push({
+                id: uid(),
+                from: connStart.nodeId,
+                fromField,
+                to: id,
+                toField
+              });
               renderConnections(); updateStatusbar(); autoSave();
             }
           }
@@ -1262,8 +1830,15 @@
         body: JSON.stringify({
           canvas_id: activeCanvasId || '',                         // 画布定义 ID
           nodes: nodes.map(n => ({ id:n.id, type:n.type, x:n.x, y:n.y, data:n.data })),
-          connections: conns.map(c => ({ id:c.id, from:c.from, to:c.to })),
+          connections: conns.map(c => ({
+            id: c.id,
+            from: c.from,
+            fromField: c.fromField,
+            to: c.to,
+            toField: c.toField,
+          })),
           run_node_ids: nodes.map(n => n.id),                      // 本次运行的节点
+          approval_mode: approvalMode,                              // 批准模式开关
         })
       });
       const d = await r.json();
@@ -1277,6 +1852,43 @@
       runCanvas([...getChainNodeIds(selectedNode)]);
     }
 
+    function toggleApprovalMode() {
+      approvalMode = !approvalMode;
+      localStorage.setItem('approval_mode', approvalMode ? 'true' : 'false');
+      updateApprovalButton();
+    }
+    function updateApprovalButton() {
+      const btn = document.getElementById('btn-approval');
+      if (!btn) return;
+      if (approvalMode) {
+        btn.classList.add('active');
+        btn.textContent = '批准模式：开';
+      } else {
+        btn.classList.remove('active');
+        btn.textContent = '批准模式';
+      }
+    }
+    async function approveNode(nodeId) {
+      if (!currentCanvasId) return;
+      try {
+        const r = await _apiFetch(`/api/canvas/${currentCanvasId}/approve/${nodeId}`, { method: 'POST' });
+        if (!r.ok) { const d = await r.json(); alert(d.detail || '批准失败'); return; }
+        startPolling(nodeId); // 级联执行后下游节点会自动进入 pending/running
+        updateNodeUI(nodeId, { status: 'success', progress: 100, image_url: nodeRuntime[nodeId]?.image_url, video_url: nodeRuntime[nodeId]?.video_url, mask_url: nodeRuntime[nodeId]?.mask_url });
+      } catch(e) { alert('批准请求失败'); }
+    }
+    async function rejectNode(nodeId) {
+      if (!currentCanvasId) return;
+      try {
+        const r = await _apiFetch(`/api/canvas/${currentCanvasId}/reject/${nodeId}`, { method: 'POST' });
+        if (!r.ok) { const d = await r.json(); alert(d.detail || '拒绝失败'); return; }
+        updateNodeUI(nodeId, { status: 'failed', progress: 100, error: '用户拒绝该生成结果' });
+      } catch(e) { alert('拒绝请求失败'); }
+    }
+    window.toggleApprovalMode = toggleApprovalMode;
+    window.approveNode = approveNode;
+    window.rejectNode = rejectNode;
+
     function startPolling(nodeId) {
       if (pollTimers[nodeId]) clearInterval(pollTimers[nodeId]);
       pollTimers[nodeId] = setInterval(async () => {
@@ -1287,11 +1899,14 @@
           const d = await r.json();
           updateNodeUI(nodeId, d);
           if (['success','failed','blocked'].includes(d.status)) { stopPolling(nodeId); checkAllDone(); }
+          // 待批准状态保持轮询，同时渲染通过/拒绝按钮
+          if (d.status === 'awaiting_approval') { renderApprovalActions(nodeId); }
         } catch(e) {}
       }, 800);
     }
     function stopPolling(nodeId) { if (pollTimers[nodeId]) { clearInterval(pollTimers[nodeId]); delete pollTimers[nodeId]; renderConnections(); } }
     function updateNodeUI(nodeId, d) {
+      const prevStatus = nodeRuntime[nodeId]?.status;
       nodeRuntime[nodeId] = { status: d.status, progress: d.progress, image_url: d.image_url, video_url: d.video_url, mask_url: d.mask_url };
       const badge = document.getElementById('badge-'+nodeId);
       if (badge) { badge.textContent = STATUS_LABELS[d.status]||d.status; badge.className = 'node-badge '+d.status; }
@@ -1308,6 +1923,43 @@
         if (changed) refreshNodePreview(nodeId);
       }
       if (d.error) { const node2 = canvasData.nodes.find(n=>n.id===nodeId); if(node2) { node2.data._error = d.error; refreshNodePreview(nodeId); } }
+        // 失败时自动打开参数面板展示错误
+        if (d.status === 'failed' && !paramsPanelNodeId) {
+          openParamsPanel(nodeId);
+        }
+      // 状态变化时刷新连线颜色
+      if (prevStatus !== d.status) renderConnections();
+      // 同步状态栏计数
+      updateStatusbar(d.status === 'running' ? 'running' : undefined);
+      // 参数面板打开的是本节点：刷新头部状态
+      if (paramsPanelNodeId === nodeId) {
+        const sub = document.querySelector('#node-params-panel .pp-subtitle');
+        if (sub) sub.textContent = `#${nodeId.slice(0,6)} · ${STATUS_LABELS[d.status]||d.status}`;
+      }
+      // 待批准状态渲染通过/拒绝按钮
+      if (d.status === 'awaiting_approval') renderApprovalActions(nodeId);
+      else removeApprovalActions(nodeId);
+    }
+    function renderApprovalActions(nodeId) {
+      const el = nodeElements[nodeId];
+      if (!el) return;
+      let layer = el.querySelector('.approval-actions');
+      if (!layer) {
+        layer = document.createElement('div');
+        layer.className = 'approval-actions';
+        el.appendChild(layer);
+      }
+      layer.innerHTML = `
+        <div class="approval-title">待批准</div>
+        <button class="tb-btn primary" onclick="event.stopPropagation();approveNode('${nodeId}')">通过</button>
+        <button class="tb-btn danger" onclick="event.stopPropagation();rejectNode('${nodeId}')">拒绝</button>
+      `;
+    }
+    function removeApprovalActions(nodeId) {
+      const el = nodeElements[nodeId];
+      if (!el) return;
+      const layer = el.querySelector('.approval-actions');
+      if (layer) layer.remove();
     }
     function checkAllDone() {
       if (Object.keys(pollTimers).length === 0) {
@@ -1424,19 +2076,51 @@
     }
 
     async function saveCanvas() {
-      const name = prompt('画布名称：', '我的画布');
+      const defaultName = activeCanvasId ? canvasData.name || '我的画布' : '我的画布';
+      const name = prompt('项目名称：', defaultName);
       if (!name) return;
       const r = await _apiFetch('/api/canvas/save', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          id: activeCanvasId || '',
           name,
           nodes: canvasData.nodes.map(n => ({ id:n.id, type:n.type, x:n.x, y:n.y, data:n.data })),
-          connections: canvasData.connections.map(c => ({ id:c.id, from:c.from, to:c.to }))
+          connections: canvasData.connections.map(c => ({ id:c.id, from:c.from, to:c.to, fromField:c.fromField, toField:c.toField }))
         })
       });
       const d = await r.json();
-      activeCanvasId = d.id;  // 保存后记住画布定义 ID，后续运行用此 ID
-      alert(`已保存：${d.name}（${d.id}）`);
+      const isUpdate = activeCanvasId === d.id && activeCanvasId;
+      activeCanvasId = d.id;
+      canvasData.name = d.name;
+      refreshProjectDrawer();
+      alert(`已${isUpdate ? '更新' : '保存'}：${d.name}（${d.id}）`);
+    }
+    async function newProject() {
+      if (!confirm('新建项目会清空当前画布，是否继续？')) return;
+      pushHistory();
+      canvasData.nodes.forEach(n => stopPolling(n.id));
+      canvasData = { nodes: [], connections: [] };
+      Object.values(nodeElements).forEach(el => el.remove());
+      Object.keys(nodeElements).forEach(k => delete nodeElements[k]);
+      selectedNode = null; currentCanvasId = null; activeCanvasId = null;
+      nodeRuntime = {};
+      renderConnections(); updateStatusbar(); updateRunSelectedBtn();
+      closeModal();
+      // 放入两个示例节点引导
+      addNodeAt('image_input', 260, 250);
+      addNodeAt('gpt_image', 760, 250);
+      renderConnections();
+      autoSave();
+    }
+    async function cloneCanvas(id) {
+      try {
+        const r = await _apiFetch(`/api/canvas/${id}/clone`, { method: 'POST' });
+        if (!r.ok) { alert('复制失败'); return; }
+        const d = await r.json();
+        loadCanvasList();
+        refreshProjectDrawer();
+        alert(`已复制为新项目：${d.name}（${d.id}）`);
+      } catch(e) { alert('复制失败：' + e.message); }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1637,7 +2321,7 @@
         body: JSON.stringify({
           name, category,
           nodes: canvasData.nodes.map(n => ({ id:n.id, type:n.type, x:n.x, y:n.y, data:n.data })),
-          connections: canvasData.connections.map(c => ({ id:c.id, from:c.from, to:c.to }))
+          connections: canvasData.connections.map(c => ({ id:c.id, from:c.from, to:c.to, fromField:c.fromField, toField:c.toField }))
         })
       });
       const d = await r.json();
@@ -1973,11 +2657,70 @@
             <span style="width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:#777"><svg style="width:100%;height:100%"><use href="#icon-list"/></svg></span>
             <div class="ci-name">${c.name}</div>
             <div class="ci-meta">${c.node_count} 节点 · ${dt}</div>
-            <button class="ci-delete" onclick="event.stopPropagation();deleteCanvas('${c.id}','${c.name}')" style="margin-left:auto;font-size:10px;color:#999;border:none;background:none;cursor:pointer;padding:2px 4px" title="删除">✕</button>
+            <div class="ci-actions" style="margin-left:auto;display:flex;gap:6px">
+              <button class="ci-action" onclick="event.stopPropagation();cloneCanvas('${c.id}')" title="复制项目">复制</button>
+              <button class="ci-action danger" onclick="event.stopPropagation();deleteCanvas('${c.id}','${c.name}')" title="删除项目">✕</button>
+            </div>
           </div>`;
         }).join('');
       }
       document.getElementById('canvas-modal').style.display = 'flex';
+      renderProjectDrawerList(d.canvases);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 左侧项目抽屉
+    // ═══════════════════════════════════════════════════════════════
+    function toggleProjectDrawer() {
+      const drawer = document.getElementById('project-drawer');
+      if (drawer.classList.contains('open')) closeProjectDrawer();
+      else openProjectDrawer();
+    }
+    async function openProjectDrawer() {
+      document.getElementById('project-drawer').classList.add('open');
+      document.getElementById('project-drawer-overlay').classList.add('open');
+      await refreshProjectDrawer();
+    }
+    function closeProjectDrawer() {
+      document.getElementById('project-drawer').classList.remove('open');
+      document.getElementById('project-drawer-overlay').classList.remove('open');
+    }
+    async function refreshProjectDrawer() {
+      try {
+        const r = await _apiFetch('/api/canvas/list');
+        const d = await r.json();
+        renderProjectDrawerList(d.canvases);
+      } catch (e) {
+        document.getElementById('project-drawer-body').innerHTML =
+          `<div style="color:#5a6573;font-size:12px;text-align:center;padding:20px">加载失败</div>`;
+      }
+    }
+    function renderProjectDrawerList(canvases) {
+      const body = document.getElementById('project-drawer-body');
+      if (!canvases || canvases.length === 0) {
+        body.innerHTML = `<div style="color:#5a6573;font-size:12px;text-align:center;padding:20px">暂无项目<br><span style="font-size:11px">点击上方「新建项目」开始</span></div>`;
+        return;
+      }
+      body.innerHTML = canvases.map(c => {
+        const dt = new Date(c.saved_at * 1000).toLocaleDateString('zh-CN');
+        const isActive = activeCanvasId === c.id;
+        return `<div class="pd-item ${isActive ? 'active' : ''}" onclick="loadCanvas('${c.id}')">
+          <div class="pd-icon"><svg><use href="#icon-list"/></svg></div>
+          <div class="pd-info">
+            <div class="pd-name" title="${c.name}">${c.name}</div>
+            <div class="pd-meta">${c.node_count} 节点 · ${dt}</div>
+          </div>
+          <div class="pd-actions" onclick="event.stopPropagation()">
+            <button title="复制" onclick="cloneCanvas('${c.id}')">复制</button>
+            <button class="danger" title="删除" onclick="deleteCanvas('${c.id}','${c.name}')">✕</button>
+          </div>
+        </div>`;
+      }).join('');
+    }
+    async function newProjectFromDrawer() {
+      if (!confirm('新建项目会清空当前画布，是否继续？')) return;
+      await newProject();
+      await refreshProjectDrawer();
     }
 
     async function loadCanvas(id) {
@@ -1996,7 +2739,9 @@
       updateStatusbar();
       undoStack = []; redoStack = []; updateUndoRedoButtons();
       closeModal();
+      closeProjectDrawer();
       autoSave();
+      refreshProjectDrawer();
     }
 
     function closeModal() { document.getElementById('canvas-modal').style.display = 'none'; }
@@ -2006,10 +2751,21 @@
       try {
         await _apiFetch(`/api/canvas/${id}`, { method: 'DELETE' });
         loadCanvasList(); // 刷新列表
+        refreshProjectDrawer();
+        if (activeCanvasId === id) {
+          activeCanvasId = null;
+          currentCanvasId = null;
+        }
       } catch (e) {
         alert('删除失败：' + e.message);
       }
     }
+    window.newProject = newProject;
+    window.cloneCanvas = cloneCanvas;
+    window.toggleProjectDrawer = toggleProjectDrawer;
+    window.closeProjectDrawer = closeProjectDrawer;
+    window.newProjectFromDrawer = newProjectFromDrawer;
+    window.refreshProjectDrawer = refreshProjectDrawer;
 
     // ═══════════════════════════════════════════════════════════════
     // 状态栏
@@ -2020,8 +2776,25 @@
       const dot = document.getElementById('sb-dot'), st = document.getElementById('sb-status');
       dot.className = 'sb-dot';
       if (state === 'running') { dot.classList.add('running'); st.textContent = '运行中...'; }
-      else if (state === 'done') { st.textContent = '全部完成'; }
+      else if (state === 'done') { dot.classList.add('success'); st.textContent = '全部完成'; }
       else { st.textContent = '就绪'; }
+      // 运行时任务计数
+      let running = 0, success = 0, failed = 0;
+      for (const nid in nodeRuntime) {
+        const r = nodeRuntime[nid];
+        if (!r) continue;
+        if (r.status === 'running' || r.status === 'pending') running++;
+        else if (r.status === 'success') success++;
+        else if (r.status === 'failed' || r.status === 'blocked' || r.status === 'interrupted') failed++;
+      }
+      const $r = document.getElementById('sb-running');
+      const $s = document.getElementById('sb-success');
+      const $f = document.getElementById('sb-failed');
+      const $rd = document.getElementById('sb-dot-running');
+      if ($r) $r.textContent = running;
+      if ($s) $s.textContent = success;
+      if ($f) $f.textContent = failed;
+      if ($rd) $rd.style.display = running > 0 ? '' : 'none';
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2029,6 +2802,7 @@
     // ═══════════════════════════════════════════════════════════════
     applyTransform();
     updateStatusbar();
+    updateApprovalButton();
 
     // 从 localStorage 恢复自动保存的画布
     const saved = localStorage.getItem('autosave');

@@ -34,3 +34,16 @@ _temp*.js
 _check_syntax.py
 .tmp*.png
 test_face.png
+
+# 遮罩服务：仅保留实际使用的 YuNet onnx 模型，忽略遗留实验模型
+models/*.caffemodel
+models/*.tflite
+models/*.prototxt
+
+# 测试输出与临时目录
+tmp_test/
+
+# 参考网页存档（非源码，仅本地参考）
+RunningHub*.html
+RunningHub*_files/
+工作流画布.html

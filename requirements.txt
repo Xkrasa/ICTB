@@ -5,3 +5,6 @@ pydantic>=2.10,<3
 python-multipart>=0.0.18,<1
 pillow>=11.0,<12
 python-dotenv>=1.0,<2
+numpy>=1.26,<2
+mediapipe>=0.10,<1
+opencv-python>=4.9,<5

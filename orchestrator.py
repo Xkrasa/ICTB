@@ -26,6 +26,37 @@ from storage import storage
 
 logger = logging.getLogger("orchestrator")
 
+# 标准化错误码
+ERROR_CODES = {
+    "TIMEOUT": {"code": "E001", "label": "超时"},
+    "API_ERROR": {"code": "E002", "label": "API调用失败"},
+    "CONTENT_AUDIT": {"code": "E003", "label": "内容安全审查未通过"},
+    "NO_UPSTREAM": {"code": "E004", "label": "缺少上游输入"},
+    "INVALID_PARAM": {"code": "E005", "label": "参数无效"},
+    "MODEL_ERROR": {"code": "E006", "label": "模型错误"},
+    "UPLOAD_ERROR": {"code": "E007", "label": "上传失败"},
+    "UNKNOWN": {"code": "E999", "label": "未知错误"},
+}
+
+def classify_error(error_msg: str) -> dict:
+    """根据错误信息分类返回标准化错误码"""
+    msg = str(error_msg).lower()
+    if "timeout" in msg or "timed out" in msg:
+        return ERROR_CODES["TIMEOUT"]
+    if "content security" in msg or "内容安全" in msg or "errorcode=1501" in msg or "audit" in msg.lower():
+        return ERROR_CODES["CONTENT_AUDIT"]
+    if "no upstream" in msg or "缺少上游" in msg or "no image" in msg or "未检测到人脸" in msg:
+        return ERROR_CODES["NO_UPSTREAM"]
+    if "invalid" in msg or "参数" in msg or "不支持的" in msg:
+        return ERROR_CODES["INVALID_PARAM"]
+    if "api" in msg or "401" in msg or "403" in msg or "429" in msg or "500" in msg:
+        return ERROR_CODES["API_ERROR"]
+    if "model" in msg:
+        return ERROR_CODES["MODEL_ERROR"]
+    if "upload" in msg or "上传" in msg:
+        return ERROR_CODES["UPLOAD_ERROR"]
+    return ERROR_CODES["UNKNOWN"]
+
 
 async def _record_image_size(canvas_id: str, node_id: str, image_url: str) -> None:
     """读取图片实际尺寸并写入 registry（用于前端显示和 size 参数验证）"""
@@ -47,6 +78,94 @@ SEM = asyncio.Semaphore(3)
 
 # 后台任务引用集合，防止被 GC 回收
 _background_tasks: set = set()
+
+
+# ───────────────────────── 节点端口定义 ─────────────────────────
+
+NODE_PORTS: dict[str, dict] = {
+    "image_input": {
+        "inputs": [],
+        "outputs": [{"name": "image", "type": "IMAGE", "label": "图片"}],
+    },
+    "gpt_image": {
+        "inputs": [
+            {"name": "image1", "type": "IMAGE", "label": "图1 · 主体"},
+            {"name": "image2", "type": "IMAGE", "label": "图2 · 参考"},
+            {"name": "prompt", "type": "TEXT", "label": "提示词"},
+        ],
+        "outputs": [{"name": "image", "type": "IMAGE", "label": "生成图"}],
+    },
+    "remove_bg": {
+        "inputs": [{"name": "image", "type": "IMAGE", "label": "图片"}],
+        "outputs": [{"name": "image", "type": "IMAGE", "label": "透明图"}],
+    },
+    "mask_edit": {
+        "inputs": [{"name": "image", "type": "IMAGE", "label": "待编辑图"}],
+        "outputs": [
+            {"name": "image", "type": "IMAGE", "label": "原图"},
+            {"name": "mask", "type": "MASK", "label": "遮罩"},
+        ],
+    },
+    "seedance_video": {
+        "inputs": [
+            {"name": "first_frame", "type": "IMAGE", "label": "首帧"},
+            {"name": "last_frame", "type": "IMAGE", "label": "尾帧（可选）"},
+            {"name": "prompt", "type": "TEXT", "label": "视频描述"},
+        ],
+        "outputs": [{"name": "video", "type": "VIDEO", "label": "视频"}],
+    },
+}
+
+# 产物字段 → 端口字段名映射
+_OUTPUT_FIELD_MAP = {
+    "image_url": "image",
+    "video_url": "video",
+    "mask_url": "mask",
+}
+
+
+def _get_output_value(upstream_rec: dict, from_field: str | None) -> tuple[str, str] | None:
+    """根据上游记录和 from_field 获取要注入的产物。
+
+    返回 (产物键, 值) 或 None。
+    产物键用于与 _OUTPUT_FIELD_MAP 匹配，决定下游注入字段。
+    """
+    if from_field:
+        # from_field 是端口名，映射回产物键
+        reverse_map = {"image": "image_url", "video": "video_url", "mask": "mask_url"}
+        asset_key = reverse_map.get(from_field)
+        if asset_key and upstream_rec.get(asset_key):
+            return asset_key, upstream_rec[asset_key]
+        return None
+
+    # 无 from_field：按优先级取第一个可用产物
+    for asset_key in ("image_url", "video_url", "mask_url"):
+        if upstream_rec.get(asset_key):
+            return asset_key, upstream_rec[asset_key]
+    return None
+
+
+def _resolve_to_field(downstream_type: str, asset_key: str, to_field: str | None) -> str | None:
+    """根据下游节点类型、产物键和 to_field 确定最终注入到下游 data 的字段名。"""
+    if to_field:
+        return to_field
+
+    ports = NODE_PORTS.get(downstream_type, {})
+    inputs = ports.get("inputs", [])
+
+    # 优先按产物类型找同名输入端口
+    port_name = _OUTPUT_FIELD_MAP.get(asset_key)
+    if port_name:
+        for inp in inputs:
+            if inp["name"] == port_name:
+                return port_name
+        # 找不到同名端口：按类型找第一个匹配的输入端口
+        asset_type = "IMAGE" if asset_key == "image_url" else ("VIDEO" if asset_key == "video_url" else "MASK")
+        for inp in inputs:
+            if inp["type"] == asset_type:
+                return inp["name"]
+
+    return None
 
 
 # ───────────────────────── TaskRegistry ─────────────────────────
@@ -269,7 +388,8 @@ async def _run(task_id: str, stage: str, params: dict) -> None:
             await executor(task_id, params)
         registry.update(task_id, status="success")
     except Exception as e:  # noqa: BLE001
-        registry.update(task_id, status="failed", error=str(e))
+        err_info = classify_error(str(e))
+        registry.update(task_id, status="failed", error=f"[{err_info['code']}] {err_info['label']}: {e}")
 
 
 # ───────────────────────── Phase 1 执行器 ─────────────────────────
@@ -360,7 +480,7 @@ def _restore_from_node_data(rec: dict, node: dict) -> None:
 
 def _inject_upstream_to_downstreams(
     canvas_id: str, upstream_id: str, upstream_rec: dict,
-    node_map: dict, adj: dict
+    node_map: dict, adj: dict, conn_map: dict | None = None
 ) -> None:
     """模拟一个不在 run_set 内的上游节点"已完成"：
     将其产物注入所有下游的 node.data，并减少下游的 remaining 计数。
@@ -373,23 +493,29 @@ def _inject_upstream_to_downstreams(
     if ctx is None:
         return
 
-    _OVERRIDABLE = {"gpt_image", "remove_bg", "mask_edit", "seedance_video"}
     for downstream in adj.get(upstream_id, []):
         downstream_node = node_map.get(downstream, {})
         downstream_data = downstream_node.get("data", {})
+        downstream_type = downstream_node.get("type", "")
         changed = False
 
-        if upstream_rec.get("image_url"):
-            downstream_type = downstream_node.get("type", "")
-            if not downstream_data.get("image_url") or downstream_type in _OVERRIDABLE:
-                downstream_data["image_url"] = upstream_rec["image_url"]
+        # 找到上游→下游的连线，按端口字段注入
+        conns = (conn_map or {}).get((upstream_id, downstream), [])
+        for conn in conns:
+            from_field = conn.get("fromField")
+            to_field = conn.get("toField")
+            resolved = _get_output_value(upstream_rec, from_field)
+            if resolved is None:
+                continue
+            asset_key, value = resolved
+            target_field = _resolve_to_field(downstream_type, asset_key, to_field)
+            if target_field is None:
+                continue
+            # 链路型节点允许被新上游产物覆盖
+            _OVERRIDABLE = {"gpt_image", "remove_bg", "mask_edit", "seedance_video"}
+            if not downstream_data.get(target_field) or downstream_type in _OVERRIDABLE:
+                downstream_data[target_field] = value
                 changed = True
-        if upstream_rec.get("video_url") and not downstream_data.get("video_url"):
-            downstream_data["video_url"] = upstream_rec["video_url"]
-            changed = True
-        if upstream_rec.get("mask_url"):
-            downstream_data["mask_url"] = upstream_rec["mask_url"]
-            changed = True
 
         if changed:
             downstream_node["data"] = downstream_data
@@ -416,7 +542,10 @@ def _new_node_record(canvas_id: str, node_id: str, node_type: str) -> dict:
     }
 
 
-def execute_canvas(canvas_id: str, nodes: list, connections: list, run_node_ids: list | None = None) -> dict:
+def execute_canvas(
+    canvas_id: str, nodes: list, connections: list,
+    run_node_ids: list | None = None, approval_mode: bool = False
+) -> dict:
     """解析 DAG 并启动入度为 0 的节点，返回 {node_id: status} 映射。
 
     级联执行：上游 success → 自动触发下游；上游 failed → 下游标记 blocked。
@@ -425,16 +554,21 @@ def execute_canvas(canvas_id: str, nodes: list, connections: list, run_node_ids:
     - 列表内的节点：创建新记录（重置状态），会重新执行。
     - 列表外的节点：保留 registry 旧记录（含历史产物），供级联注入。
     - 为 None 或空：运行全部节点（向后兼容）。
+
+    approval_mode: 是否开启批准模式。开启后 AI 生成节点（gpt_image/seedance_video）
+    成功后进入 awaiting_approval 状态，需用户手动批准才继续下游。
     """
     logger.info("execute_canvas %s nodes=%d run_node_ids=%s", canvas_id, len(nodes), run_node_ids)
     node_map = {n["id"]: n for n in nodes}
 
     # 构建 DAG
     adj: dict[str, list[str]] = defaultdict(list)   # from -> [to...]
+    conn_map: dict[tuple[str, str], list[dict]] = defaultdict(list)  # (from, to) -> [conn...]
     in_degree: dict[str, int] = {nid: 0 for nid in node_map}
     for conn in connections:
         src, dst = conn["from"], conn["to"]
         adj[src].append(dst)
+        conn_map[(src, dst)].append(conn)
         in_degree[dst] += 1
 
     # 注册节点：区分「本次运行」与「保留历史」
@@ -471,8 +605,10 @@ def execute_canvas(canvas_id: str, nodes: list, connections: list, run_node_ids:
     _canvas_contexts[canvas_id] = {
         "node_map": node_map,
         "adj": adj,
+        "conn_map": conn_map,
         "in_degree": in_degree,
         "remaining": dict(in_degree),
+        "approval_mode": approval_mode,
     }
 
     # 对不在 run_set 中的上游节点，模拟"已完成"：
@@ -482,7 +618,7 @@ def execute_canvas(canvas_id: str, nodes: list, connections: list, run_node_ids:
             continue
         rec = registry.get(f"{canvas_id}:{nid}")
         if rec and rec.get("status") == "success":
-            _inject_upstream_to_downstreams(canvas_id, nid, rec, node_map, adj)
+            _inject_upstream_to_downstreams(canvas_id, nid, rec, node_map, adj, conn_map)
 
     # 启动 run_set 内 remaining 已归零的节点
     for nid in run_set:
@@ -554,13 +690,55 @@ async def _run_node(canvas_id: str, node_id: str, task_id: str,
             if executor is None:
                 raise ValueError(f"未知节点类型: {node_type}")
             await executor(canvas_id, node_id, params)
+
+        # 批准模式：AI 生成节点成功后暂停，等待用户审批
+        ctx = _canvas_contexts.get(canvas_id, {})
+        if ctx.get("approval_mode") and node_type in ("gpt_image", "seedance_video"):
+            registry.update(
+                f"{canvas_id}:{node_id}",
+                status="awaiting_approval",
+                progress=100,
+                error=None,
+            )
+            logger.info("node %s:%s awaiting approval", canvas_id, node_id)
+            return
+
         registry.update(f"{canvas_id}:{node_id}", status="success", progress=100)
         logger.info("node %s:%s success", canvas_id, node_id)
         _schedule_cascade(canvas_id, node_id, success=True)
     except Exception as e:  # noqa: BLE001
-        registry.update(f"{canvas_id}:{node_id}", status="failed", error=str(e))
+        err_info = classify_error(str(e))
+        registry.update(f"{canvas_id}:{node_id}", status="failed", error=f"[{err_info['code']}] {err_info['label']}: {e}")
         logger.error("node %s:%s failed: %s", canvas_id, node_id, e)
         _schedule_cascade(canvas_id, node_id, success=False)
+
+
+def approve_node(canvas_id: str, node_id: str) -> dict:
+    """批准模式：将通过审核的节点标记为 success 并继续级联下游。"""
+    key = f"{canvas_id}:{node_id}"
+    rec = registry.get(key)
+    if rec is None:
+        raise ValueError("节点不存在")
+    if rec.get("status") != "awaiting_approval":
+        raise ValueError(f"节点状态为 {rec.get('status')}，不是待批准状态")
+    registry.update(key, status="success", error=None)
+    logger.info("node %s:%s approved", canvas_id, node_id)
+    _schedule_cascade(canvas_id, node_id, success=True)
+    return {"node_id": node_id, "status": "success"}
+
+
+def reject_node(canvas_id: str, node_id: str) -> dict:
+    """批准模式：拒绝节点产出，标记 failed 并阻断下游。"""
+    key = f"{canvas_id}:{node_id}"
+    rec = registry.get(key)
+    if rec is None:
+        raise ValueError("节点不存在")
+    if rec.get("status") != "awaiting_approval":
+        raise ValueError(f"节点状态为 {rec.get('status')}，不是待批准状态")
+    registry.update(key, status="failed", error="用户拒绝该生成结果")
+    logger.info("node %s:%s rejected", canvas_id, node_id)
+    _schedule_cascade(canvas_id, node_id, success=False)
+    return {"node_id": node_id, "status": "failed"}
 
 
 def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
@@ -568,6 +746,8 @@ def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
     ctx = _canvas_contexts.get(canvas_id)
     if ctx is None:
         return
+
+    conn_map = ctx.get("conn_map", {})
 
     for downstream in ctx["adj"].get(node_id, []):
         if not success:
@@ -585,23 +765,26 @@ def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
         if upstream_rec is not None:
             downstream_node = ctx["node_map"].get(downstream, {})
             downstream_data = downstream_node.get("data", {})
+            downstream_type = downstream_node.get("type", "")
             changed = False
-            # 注入图片：下游为空时注入；
-            # 对链路型节点（重新跑上游时应被新 AI 图覆盖，而非沿用旧值）
             _OVERRIDABLE = {"gpt_image", "remove_bg", "mask_edit", "seedance_video"}
-            if upstream_rec.get("image_url"):
-                downstream_type = downstream_node.get("type", "")
-                if not downstream_data.get("image_url") or downstream_type in _OVERRIDABLE:
-                    downstream_data["image_url"] = upstream_rec["image_url"]
+
+            # 按连线端口字段注入
+            conns = conn_map.get((node_id, downstream), [])
+            for conn in conns:
+                from_field = conn.get("fromField")
+                to_field = conn.get("toField")
+                resolved = _get_output_value(upstream_rec, from_field)
+                if resolved is None:
+                    continue
+                asset_key, value = resolved
+                target_field = _resolve_to_field(downstream_type, asset_key, to_field)
+                if target_field is None:
+                    continue
+                if not downstream_data.get(target_field) or downstream_type in _OVERRIDABLE:
+                    downstream_data[target_field] = value
                     changed = True
-            # 注入视频
-            if upstream_rec.get("video_url") and not downstream_data.get("video_url"):
-                downstream_data["video_url"] = upstream_rec["video_url"]
-                changed = True
-            # 注入遮罩
-            if upstream_rec.get("mask_url"):
-                downstream_data["mask_url"] = upstream_rec["mask_url"]
-                changed = True
+
             if changed:
                 downstream_node["data"] = downstream_data
 
@@ -632,7 +815,9 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
     """
     model = params.get("model", "gpt-image-2")
     logger.info("exec_gpt_image model=%s", model)
-    ref_url = params.get("image_url")
+    # 兼容新端口字段 image1 / image2 和旧字段 image_url / image2_url
+    ref_url = params.get("image1") or params.get("image_url")
+    image2_url = params.get("image2") or params.get("image2_url")
     if not ref_url and model not in ("rh_gpt_image_i2i", "gpt-image-2"):
         raise ValueError("gpt_image 节点缺少输入图片（请连线 image_input 或上游节点）")
 
@@ -648,7 +833,7 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
 
     # 以下走 RH 工作流异步渠道
     if len(prompt) < 5:
-        if model == "rh_gpt_image_i2i" and not (ref_url or params.get("image2_url")):
+        if model == "rh_gpt_image_i2i" and not (ref_url or image2_url):
             prompt = "生成高质量商业海报图像，画面精致，细节丰富。"
         else:
             prompt = "基于参考图生成高质量图像，保持人物特征。"
@@ -656,12 +841,12 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
     registry.update(f"{canvas_id}:{node_id}", progress=10)
 
     if model == "rh_gpt_image_i2i":
-        primary_url = ref_url or params.get("image2_url")
+        primary_url = ref_url or image2_url
         if primary_url:
             ref_bytes = await storage.download(primary_url)
             img2_bytes = None
-            if ref_url and params.get("image2_url"):
-                img2_bytes = await storage.download(params["image2_url"])
+            if ref_url and image2_url:
+                img2_bytes = await storage.download(image2_url)
             png_bytes = await rh_image.rh_gpt_image_i2i(
                 ref_bytes, img2_bytes, prompt, aspect_ratio, resolution,
                 on_progress=_rh_progress_cb(canvas_id, node_id),
@@ -689,7 +874,7 @@ async def exec_gpt_image(canvas_id: str, node_id: str, params: dict) -> None:
     elif model == "nano_banana_2":
         ref_bytes = await storage.download(ref_url)
         extra_urls = [
-            params.get("image2_url"),
+            image2_url,
             params.get("image3_url"),
             params.get("image4_url"),
             params.get("hair_url"),
@@ -783,7 +968,8 @@ async def exec_remove_bg(canvas_id: str, node_id: str, params: dict) -> None:
     if not config.RUNNINGHUB_API_KEY:
         raise ValueError("未配置 RUNNINGHUB_API_KEY，请在 .env 中设置")
 
-    ref_url = params.get("image_url")
+    # 兼容新端口字段 image 和旧字段 image_url
+    ref_url = params.get("image") or params.get("image_url")
     if not ref_url:
         raise ValueError("remove_bg 节点缺少输入图片")
 
@@ -877,7 +1063,8 @@ async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> Non
     if not config.RUNNINGHUB_API_KEY:
         raise ValueError("未配置 RUNNINGHUB_API_KEY，请在 .env 中设置")
 
-    ref_url = params.get("image_url")
+    # 兼容新端口字段 first_frame / last_frame 和旧字段 image_url / image2_url
+    ref_url = params.get("first_frame") or params.get("image_url")
     if not ref_url:
         raise ValueError("seedance_video 节点缺少输入图片（首帧）")
     prompt = params.get("prompt", "")
@@ -891,7 +1078,7 @@ async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> Non
     if channel == "first_last_frame":
         registry.update(f"{canvas_id}:{node_id}", progress=5)
         ref_bytes = await storage.download(ref_url)
-        last_url = params.get("image2_url")
+        last_url = params.get("last_frame") or params.get("image2_url")
         last_bytes = await storage.download(last_url) if last_url else None
         registry.update(f"{canvas_id}:{node_id}", progress=10)
         resolution = params.get("resolution", "480p")
@@ -943,16 +1130,53 @@ async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> Non
 async def exec_mask_edit(canvas_id: str, node_id: str, params: dict) -> None:
     """遮罩编辑节点：透传原图 + 注入 mask_url。
 
-    前端 Canvas 涂抹后上传 mask 到 /api/assets/upload，mask_url 存入 data。
-    此节点把 image_url 和 mask_url 同时设入 registry，供下游 gpt_image 使用。
+    支持三种模式：
+    - auto_face：自动检测人脸并生成人脸遮罩
+    - auto_full：生成全图保留遮罩
+    - manual：使用前端手动绘制的 mask_url
     """
-    ref_url = params.get("image_url")
+    # 兼容新端口字段 image 和旧字段 image_url
+    ref_url = params.get("image") or params.get("image_url")
     mask_url = params.get("mask_url")
+    mode = params.get("mask_mode", "manual")
     if not ref_url:
         raise ValueError("mask_edit 节点缺少输入图片")
-    if not mask_url:
-        raise ValueError("mask_edit 节点未绘制遮罩（请双击节点编辑遮罩）")
-    registry.update(f"{canvas_id}:{node_id}", progress=50, image_url=ref_url, mask_url=mask_url)
+
+    registry.update(f"{canvas_id}:{node_id}", progress=10)
+
+    if mode == "auto_face":
+        from mask_service import detect_face_mask, generate_full_mask
+        ref_bytes = await storage.download(ref_url)
+        registry.update(f"{canvas_id}:{node_id}", progress=30)
+        try:
+            expand = float(params.get("expand", 0.25))
+            face_index = int(params.get("face_index", -1))
+            detect_method = params.get("detect_method", "auto")
+            if detect_method not in ("auto", "opencv_haar", "opencv_yunet"):
+                detect_method = "auto"
+            mask_value = int(params.get("mask_value", 255))
+            mask_bytes = detect_face_mask(
+                ref_bytes, expand=expand, method=detect_method, face_index=face_index, mask_value=mask_value
+            )
+        except ValueError as e:
+            # 人脸检测失败：fallback 到全图遮罩，而不是直接失败
+            logger.warning("mask_edit auto_face failed for %s:%s: %s", canvas_id, node_id, e)
+            mask_bytes = generate_full_mask(ref_bytes)
+        mask_url = await storage.save(mask_bytes, "png")
+        registry.update(f"{canvas_id}:{node_id}", progress=70, mask_url=mask_url)
+    elif mode == "auto_full":
+        from mask_service import generate_full_mask
+        ref_bytes = await storage.download(ref_url)
+        registry.update(f"{canvas_id}:{node_id}", progress=40)
+        mask_bytes = generate_full_mask(ref_bytes)
+        mask_url = await storage.save(mask_bytes, "png")
+        registry.update(f"{canvas_id}:{node_id}", progress=70, mask_url=mask_url)
+    else:
+        # manual
+        if not mask_url:
+            raise ValueError("mask_edit 节点未绘制遮罩（请双击节点编辑遮罩，或切换自动模式）")
+
+    registry.update(f"{canvas_id}:{node_id}", progress=90, image_url=ref_url, mask_url=mask_url)
     await _record_image_size(canvas_id, node_id, ref_url)
     await asyncio.sleep(0.1)
     registry.update(f"{canvas_id}:{node_id}", progress=100)

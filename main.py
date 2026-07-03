@@ -93,12 +93,18 @@ class ConnectionData(BaseModel):
     id: str
     from_node: str
     to: str
+    from_field: str | None = None
+    to_field: str | None = None
 
     model_config = {"populate_by_name": True}
 
     def __init__(self, **data):
         if "from" in data:
             data["from_node"] = data.pop("from")
+        if "fromField" in data:
+            data["from_field"] = data.pop("fromField")
+        if "toField" in data:
+            data["to_field"] = data.pop("toField")
         super().__init__(**data)
 
 
@@ -107,6 +113,7 @@ class CanvasRunRequest(BaseModel):
     nodes: list[NodeData]
     connections: list[ConnectionData]
     run_node_ids: list[str] = [] # 本次要运行的节点 ID（空=运行全部）
+    approval_mode: bool = False  # 是否开启批准模式
 
 
 # ───────────────────────── 路由 ─────────────────────────
@@ -182,9 +189,22 @@ async def canvas_run(req: CanvasRunRequest):
     """
     canvas_id = req.canvas_id or uuid.uuid4().hex[:8]
     nodes = [n.model_dump() for n in req.nodes]
-    conns = [{"id": c.id, "from": c.from_node, "to": c.to} for c in req.connections]
+    conns = [
+        {
+            "id": c.id,
+            "from": c.from_node,
+            "to": c.to,
+            "fromField": c.from_field,
+            "toField": c.to_field,
+        }
+        for c in req.connections
+    ]
     run_node_ids = req.run_node_ids or None
-    node_statuses = orchestrator.execute_canvas(canvas_id, nodes, conns, run_node_ids=run_node_ids)
+    node_statuses = orchestrator.execute_canvas(
+        canvas_id, nodes, conns,
+        run_node_ids=run_node_ids,
+        approval_mode=req.approval_mode,
+    )
     return {"canvas_id": canvas_id, "node_statuses": node_statuses}
 
 
@@ -206,9 +226,28 @@ async def get_node_status(canvas_id: str, node_id: str):
     }
 
 
+@app.post("/api/canvas/{canvas_id}/approve/{node_id}")
+async def canvas_approve(canvas_id: str, node_id: str):
+    """批准模式：通过当前节点的生成结果，继续执行下游。"""
+    try:
+        return orchestrator.approve_node(canvas_id, node_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/canvas/{canvas_id}/reject/{node_id}")
+async def canvas_reject(canvas_id: str, node_id: str):
+    """批准模式：拒绝当前节点的生成结果，阻断下游。"""
+    try:
+        return orchestrator.reject_node(canvas_id, node_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # ---- Phase 3 画布持久化 ----
 
 class CanvasSaveRequest(BaseModel):
+    id: str = ""          # 空=新建；非空=更新已有画布
     name: str = ""
     nodes: list
     connections: list
@@ -216,8 +255,8 @@ class CanvasSaveRequest(BaseModel):
 
 @app.post("/api/canvas/save")
 async def canvas_save(req: CanvasSaveRequest):
-    """保存画布 JSON 到 canvases/ 目录"""
-    canvas_id = uuid.uuid4().hex[:8]
+    """保存画布 JSON 到 canvases/ 目录。id 为空则新建，否则更新已有画布。"""
+    canvas_id = req.id if req.id else uuid.uuid4().hex[:8]
     name = req.name or f"画布_{canvas_id}"
     data = {
         "id": canvas_id,
@@ -230,6 +269,29 @@ async def canvas_save(req: CanvasSaveRequest):
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return {"id": canvas_id, "name": name}
+
+
+@app.post("/api/canvas/{canvas_id}/clone")
+async def canvas_clone(canvas_id: str):
+    """复制指定画布为新项目。"""
+    f = CANVAS_DIR / f"{canvas_id}.json"
+    if not f.exists():
+        raise HTTPException(status_code=404, detail="canvas not found")
+    data = json.loads(f.read_text(encoding="utf-8"))
+    new_id = uuid.uuid4().hex[:8]
+    data["id"] = new_id
+    data["name"] = (data.get("name") or f"画布_{canvas_id}") + " 副本"
+    data["saved_at"] = time.time()
+    # 清除旧运行产物，避免把历史产物带进新项目
+    for n in data.get("nodes", []):
+        nd = n.get("data", {})
+        for key in ("image_url", "video_url", "mask_url", "_error", "_width", "_height"):
+            if key in nd:
+                del nd[key]
+    (CANVAS_DIR / f"{new_id}.json").write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return {"id": new_id, "name": data["name"]}
 
 
 @app.get("/api/canvas/list")
