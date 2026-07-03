@@ -14,10 +14,9 @@
 """
 import asyncio
 
-import httpx
-
 import config
 from clients import runninghub
+from clients.http_client import get_client
 
 # ───────────────────────── 工作流常量 ─────────────────────────
 
@@ -41,22 +40,23 @@ async def _submit_workflow(workflow_id: str, node_info_list: list[dict]) -> str:
         "instanceType": "default",
         "usePersonalQueue": "false",
     }
-    async with httpx.AsyncClient(timeout=config.RUNNINGHUB_TIMEOUT) as client:
-        resp = await client.post(
-            f"{config.RUNNINGHUB_BASE_URL}/run/ai-app/{workflow_id}",
-            headers={
-                "Authorization": f"Bearer {config.RUNNINGHUB_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
+    client = get_client()
+    resp = await client.post(
+        f"{config.RUNNINGHUB_BASE_URL}/run/ai-app/{workflow_id}",
+        headers={
+            "Authorization": f"Bearer {config.RUNNINGHUB_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=config.RUNNINGHUB_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("errorCode"):
+        raise RuntimeError(
+            f"RH 工作流提交失败: {data.get('errorCode')} {data.get('errorMessage', '')}"
         )
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("errorCode"):
-            raise RuntimeError(
-                f"RH 工作流提交失败: {data.get('errorCode')} {data.get('errorMessage', '')}"
-            )
-        return data["taskId"]
+    return data["taskId"]
 
 
 async def _run_workflow_and_wait(
@@ -88,10 +88,10 @@ async def _run_workflow_and_wait(
                 url = r.get("url")
                 if url and (r.get("outputType") in ("png", "jpg", "jpeg", "webp") or url):
                     # 下载并返回 bytes（RH URL 24h 过期，由调用方 storage.save 转存）
-                    async with httpx.AsyncClient(timeout=120) as c:
-                        dl = await c.get(url)
-                        dl.raise_for_status()
-                        return dl.content
+                    c = get_client()
+                    dl = await c.get(url, timeout=120)
+                    dl.raise_for_status()
+                    return dl.content
             raise RuntimeError(f"RH 工作流成功但无图片结果: {result}")
         if status == "FAILED":
             raise RuntimeError(
@@ -132,10 +132,10 @@ async def _run_workflow_and_wait_video(
             for r in results:
                 url = r.get("url")
                 if url and r.get("outputType") in ("mp4", "video", None):
-                    async with httpx.AsyncClient(timeout=120) as c:
-                        dl = await c.get(url)
-                        dl.raise_for_status()
-                        return dl.content
+                    c = get_client()
+                    dl = await c.get(url, timeout=120)
+                    dl.raise_for_status()
+                    return dl.content
             raise RuntimeError(f"RH 视频工作流成功但无视频结果: {result}")
         if status == "FAILED":
             raise RuntimeError(

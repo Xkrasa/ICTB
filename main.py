@@ -4,6 +4,7 @@ import logging
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 
 import config
 import orchestrator
+from clients.http_client import close_http_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("main")
@@ -29,7 +31,16 @@ TEMPLATE_DIR = Path("templates")
 TEMPLATE_DIR.mkdir(exist_ok=True)
 from storage import storage
 
-app = FastAPI(title="AI 团播资产画布 — Phase 3")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：启动时无需预创建（httpx client 懒加载），关闭时释放共享连接。"""
+    yield
+    await close_http_client()
+    orchestrator.registry.close()
+
+
+app = FastAPI(title="AI 团播资产画布 — Phase 3", lifespan=lifespan)
 
 
 # ───────────────────────── API Key 访问控制 ─────────────────────────

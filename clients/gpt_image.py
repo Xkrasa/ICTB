@@ -19,6 +19,7 @@ import httpx
 from PIL import Image
 
 import config
+from clients.http_client import get_client
 
 # 429 退避重试配置（中转上游负载饱和时的标准应对）
 _RETRY_STATUSES = {429, 502, 503, 504}
@@ -64,46 +65,47 @@ async def _post_edits_with_retry(
     """对单个渠道执行 429 退避重试 + raise_for_status，返回图像 bytes。"""
     headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
     last_err: Exception | None = None
-    async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as client:
-        for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
-            if backoff:
-                await asyncio.sleep(backoff)
-            try:
-                resp = await client.post(
-                    f"{base_url}/images/edits",
-                    headers=headers,
-                    data=form_data,
-                    files=files,
+    client = get_client()
+    for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
+        if backoff:
+            await asyncio.sleep(backoff)
+        try:
+            resp = await client.post(
+                f"{base_url}/images/edits",
+                headers=headers,
+                data=form_data,
+                files=files,
+                timeout=config.GPT_IMAGE_TIMEOUT,
+            )
+            if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
+                last_err = _ChannelExhausted(
+                    f"gpt-image HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
                 )
-                if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
-                    last_err = _ChannelExhausted(
-                        f"gpt-image HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
-                    )
-                    continue
-                if resp.status_code in (401, 403):
-                    # 认证/权限错误：当前渠道不可用，切下一个渠道
-                    raise _ChannelExhausted(
-                        f"gpt-image HTTP {resp.status_code}: {resp.text}"
-                    )
-                if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    # 业务错误（参数、文件格式等）：不重试，不切渠道
-                    raise _ChannelBusinessError(
-                        f"gpt-image HTTP {resp.status_code}: {resp.text}"
-                    )
-                resp.raise_for_status()
-                payload = resp.json()
-                return await _extract_image_bytes(payload)
-            except httpx.HTTPStatusError as e:
-                # 5xx：切渠道
+                continue
+            if resp.status_code in (401, 403):
+                # 认证/权限错误：当前渠道不可用，切下一个渠道
                 raise _ChannelExhausted(
-                    f"gpt-image HTTP {e.response.status_code}: {e.response.text}"
-                ) from e
-            except httpx.HTTPError as e:
-                # 网络错误：重试或切渠道
-                if attempt < len(_RETRY_BACKOFFS):
-                    last_err = _ChannelExhausted(f"gpt-image 请求失败: {e}")
-                    continue
-                raise _ChannelExhausted(f"gpt-image 请求失败: {e}") from e
+                    f"gpt-image HTTP {resp.status_code}: {resp.text}"
+                )
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                # 业务错误（参数、文件格式等）：不重试，不切渠道
+                raise _ChannelBusinessError(
+                    f"gpt-image HTTP {resp.status_code}: {resp.text}"
+                )
+            resp.raise_for_status()
+            payload = resp.json()
+            return await _extract_image_bytes(payload)
+        except httpx.HTTPStatusError as e:
+            # 5xx：切渠道
+            raise _ChannelExhausted(
+                f"gpt-image HTTP {e.response.status_code}: {e.response.text}"
+            ) from e
+        except httpx.HTTPError as e:
+            # 网络错误：重试或切渠道
+            if attempt < len(_RETRY_BACKOFFS):
+                last_err = _ChannelExhausted(f"gpt-image 请求失败: {e}")
+                continue
+            raise _ChannelExhausted(f"gpt-image 请求失败: {e}") from e
     raise last_err or _ChannelExhausted("gpt-image 重试耗尽")
 
 
@@ -179,10 +181,10 @@ async def _extract_image_bytes(payload: dict) -> bytes:
         return base64.b64decode(b64)
     url = item.get("url")
     if url:
-        async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as c:
-            r = await c.get(url)
-            r.raise_for_status()
-            return r.content
+        c = get_client()
+        r = await c.get(url, timeout=config.GPT_IMAGE_TIMEOUT)
+        r.raise_for_status()
+        return r.content
     raise RuntimeError(f"gpt-image 响应无 b64_json 也无 url: {item}")
 
 
@@ -305,41 +307,42 @@ async def _post_generations_with_retry(
         "Content-Type": "application/json",
     }
     last_err: Exception | None = None
-    async with httpx.AsyncClient(timeout=config.GPT_IMAGE_TIMEOUT) as client:
-        for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
-            if backoff:
-                await asyncio.sleep(backoff)
-            try:
-                resp = await client.post(
-                    f"{base_url}/images/generations",
-                    headers=headers,
-                    json=json_body,
+    client = get_client()
+    for attempt, backoff in enumerate([0] + _RETRY_BACKOFFS):
+        if backoff:
+            await asyncio.sleep(backoff)
+        try:
+            resp = await client.post(
+                f"{base_url}/images/generations",
+                headers=headers,
+                json=json_body,
+                timeout=config.GPT_IMAGE_TIMEOUT,
+            )
+            if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
+                last_err = _ChannelExhausted(
+                    f"generations HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
                 )
-                if resp.status_code in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFFS):
-                    last_err = _ChannelExhausted(
-                        f"generations HTTP {resp.status_code}（重试 {attempt+1}/{len(_RETRY_BACKOFFS)}）: {resp.text[:200]}"
-                    )
-                    continue
-                if resp.status_code in (401, 403):
-                    raise _ChannelExhausted(
-                        f"generations HTTP {resp.status_code}: {resp.text}"
-                    )
-                if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    raise _ChannelBusinessError(
-                        f"generations HTTP {resp.status_code}: {resp.text}"
-                    )
-                resp.raise_for_status()
-                payload = resp.json()
-                return await _extract_image_bytes(payload)
-            except httpx.HTTPStatusError as e:
+                continue
+            if resp.status_code in (401, 403):
                 raise _ChannelExhausted(
-                    f"generations HTTP {e.response.status_code}: {e.response.text}"
-                ) from e
-            except httpx.HTTPError as e:
-                if attempt < len(_RETRY_BACKOFFS):
-                    last_err = _ChannelExhausted(f"generations 请求失败: {e}")
-                    continue
-                raise _ChannelExhausted(f"generations 请求失败: {e}") from e
+                    f"generations HTTP {resp.status_code}: {resp.text}"
+                )
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                raise _ChannelBusinessError(
+                    f"generations HTTP {resp.status_code}: {resp.text}"
+                )
+            resp.raise_for_status()
+            payload = resp.json()
+            return await _extract_image_bytes(payload)
+        except httpx.HTTPStatusError as e:
+            raise _ChannelExhausted(
+                f"generations HTTP {e.response.status_code}: {e.response.text}"
+            ) from e
+        except httpx.HTTPError as e:
+            if attempt < len(_RETRY_BACKOFFS):
+                last_err = _ChannelExhausted(f"generations 请求失败: {e}")
+                continue
+            raise _ChannelExhausted(f"generations 请求失败: {e}") from e
     raise last_err or _ChannelExhausted("generations 重试耗尽")
 
 

@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Protocol
 
-import httpx
+from clients.http_client import get_client
 
 
 class StorageBackend(Protocol):
@@ -55,10 +55,11 @@ class LocalAdapter:
             local_path = os.path.join(self.root, rel.replace("/", os.sep))
             return await asyncio.to_thread(self._read, local_path)
         # 远程 URL（如 seedance 视频链接 24h 过期前下载）
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return resp.content
+        # 复用全局共享 client；timeout=120 防大视频误超时（原默认 5s 是 bug）
+        client = get_client()
+        resp = await client.get(url, timeout=120)
+        resp.raise_for_status()
+        return resp.content
 
     @staticmethod
     def _read(local_path: str) -> bytes:

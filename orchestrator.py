@@ -23,6 +23,7 @@ import httpx
 
 import config
 from clients import gpt_image, rh_image, runninghub
+from clients.http_client import get_client
 from storage import storage
 
 logger = logging.getLogger("orchestrator")
@@ -999,22 +1000,23 @@ async def exec_remove_bg(canvas_id: str, node_id: str, params: dict) -> None:
         "instanceType": "default",
         "usePersonalQueue": "false",
     }
-    async with httpx.AsyncClient(timeout=config.RUNNINGHUB_TIMEOUT) as client:
-        resp = await client.post(
-            f"{config.RUNNINGHUB_BASE_URL}/run/ai-app/{workflow_id}",
-            headers={
-                "Authorization": f"Bearer {config.RUNNINGHUB_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
+    client = get_client()
+    resp = await client.post(
+        f"{config.RUNNINGHUB_BASE_URL}/run/ai-app/{workflow_id}",
+        headers={
+            "Authorization": f"Bearer {config.RUNNINGHUB_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=config.RUNNINGHUB_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("errorCode"):
+        raise RuntimeError(
+            f"RH 抠图提交失败: {data.get('errorCode')} {data.get('errorMessage', '')}"
         )
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("errorCode"):
-            raise RuntimeError(
-                f"RH 抠图提交失败: {data.get('errorCode')} {data.get('errorMessage', '')}"
-            )
-        rh_task_id = data["taskId"]
+    rh_task_id = data["taskId"]
 
     registry.update(f"{canvas_id}:{node_id}", progress=35, external_task_id=rh_task_id)
 
@@ -1029,10 +1031,10 @@ async def exec_remove_bg(canvas_id: str, node_id: str, params: dict) -> None:
             for r in results:
                 url = r.get("url")
                 if url:
-                    async with httpx.AsyncClient(timeout=120) as c:
-                        dl = await c.get(url)
-                        dl.raise_for_status()
-                        png_bytes = dl.content
+                    c = get_client()
+                    dl = await c.get(url, timeout=120)
+                    dl.raise_for_status()
+                    png_bytes = dl.content
                     out_url = await storage.save(png_bytes, "png")
                     registry.update(f"{canvas_id}:{node_id}", progress=95, image_url=out_url)
                     await _record_image_size(canvas_id, node_id, out_url)
@@ -1124,10 +1126,10 @@ async def exec_seedance_video(canvas_id: str, node_id: str, params: dict) -> Non
     video_url = await runninghub.wait_for_result(task_id, on_progress)
 
     registry.update(f"{canvas_id}:{node_id}", progress=85)
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.get(video_url)
-        resp.raise_for_status()
-        video_bytes = resp.content
+    client = get_client()
+    resp = await client.get(video_url, timeout=120)
+    resp.raise_for_status()
+    video_bytes = resp.content
 
     url = await storage.save(video_bytes, "mp4")
     registry.update(f"{canvas_id}:{node_id}", progress=95, video_url=url)

@@ -9,9 +9,8 @@
 """
 import asyncio
 
-import httpx
-
 import config
+from clients.http_client import get_client
 
 # 渠道配置
 _CHANNELS = {
@@ -42,17 +41,18 @@ def _get_channel() -> dict:
 async def upload_image(image_bytes: bytes, filename: str = "image.png") -> str:
     """上传本地图片到 RunningHub，返回 download_url（1 天有效）。"""
     headers = {"Authorization": f"Bearer {config.RUNNINGHUB_API_KEY}"}
-    async with httpx.AsyncClient(timeout=config.RUNNINGHUB_TIMEOUT) as client:
-        resp = await client.post(
-            f"{config.RUNNINGHUB_BASE_URL}/media/upload/binary",
-            headers=headers,
-            files={"file": (filename, image_bytes, "image/png")},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"RunningHub 上传失败: {data.get('message', data)}")
-        return data["data"]["download_url"]
+    client = get_client()
+    resp = await client.post(
+        f"{config.RUNNINGHUB_BASE_URL}/media/upload/binary",
+        headers=headers,
+        files={"file": (filename, image_bytes, "image/png")},
+        timeout=config.RUNNINGHUB_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"RunningHub 上传失败: {data.get('message', data)}")
+    return data["data"]["download_url"]
 
 
 async def image_to_video(
@@ -84,15 +84,15 @@ async def image_to_video(
         payload["aspectRatio"] = aspect_ratio
 
     endpoint = f"{config.RUNNINGHUB_BASE_URL}{ch['endpoint']}"
-    async with httpx.AsyncClient(timeout=config.RUNNINGHUB_TIMEOUT) as client:
-        resp = await client.post(endpoint, headers=_headers(), json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("errorCode"):
-            raise RuntimeError(
-                f"RunningHub 提交失败: {data.get('errorCode')} {data.get('errorMessage', '')}"
-            )
-        return data["taskId"]
+    client = get_client()
+    resp = await client.post(endpoint, headers=_headers(), json=payload, timeout=config.RUNNINGHUB_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("errorCode"):
+        raise RuntimeError(
+            f"RunningHub 提交失败: {data.get('errorCode')} {data.get('errorMessage', '')}"
+        )
+    return data["taskId"]
 
 
 async def query_task(task_id: str) -> dict:
@@ -106,14 +106,15 @@ async def query_task(task_id: str) -> dict:
             "errorMessage": str,
         }
     """
-    async with httpx.AsyncClient(timeout=config.RUNNINGHUB_TIMEOUT) as client:
-        resp = await client.post(
-            f"{config.RUNNINGHUB_BASE_URL}/query",
-            headers=_headers(),
-            json={"taskId": task_id},
-        )
-        resp.raise_for_status()
-        return resp.json()
+    client = get_client()
+    resp = await client.post(
+        f"{config.RUNNINGHUB_BASE_URL}/query",
+        headers=_headers(),
+        json={"taskId": task_id},
+        timeout=config.RUNNINGHUB_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def wait_for_result(
