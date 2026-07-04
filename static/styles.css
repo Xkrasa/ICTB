@@ -78,6 +78,12 @@
       --dur:      0.22s;
       --dur-slow: 0.34s;
 
+      /* 节点尺寸（与 JS 常量保持同步） */
+      --node-width: 240px;
+      --node-min-height: 160px;
+      --node-max-height: 420px;
+      --snap-grid: 24px;
+
       /* 项目抽屉 */
       --drawer-width: 260px;
     }
@@ -203,7 +209,7 @@
     #grid-bg {
       position: absolute; top: -5000px; left: -5000px; width: 10000px; height: 10000px;
       background-image: radial-gradient(circle, rgba(255,255,255,0.06) 1px, transparent 1px);
-      background-size: 24px 24px;
+      background-size: var(--snap-grid) var(--snap-grid);
       pointer-events: none;
     }
 
@@ -245,7 +251,7 @@
     /* ═══════════ 节点卡片（大图模式）═══════════ */
     .node {
       position: absolute;
-      width: 240px; height: 240px;
+      width: var(--node-width); min-height: var(--node-min-height);
       background: color-mix(in oklch, var(--node-color) 4%, rgba(13, 13, 17, 0.85));
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
@@ -253,6 +259,7 @@
       border-radius: var(--r-lg);
       overflow: visible;   /* 关键：允许标题栏和状态徽章浮出 */
       user-select: none;
+      cursor: grab;        /* 整卡可拖动 */
       box-shadow:
         0 8px 32px rgba(0, 0, 0, 0.5),
         inset 0 1px 1px rgba(255, 255, 255, 0.05);
@@ -261,8 +268,8 @@
         box-shadow var(--dur) var(--ease-out),
         transform var(--dur-fast) var(--ease-out);
     }
-    .node.gen-node { height: 240px; }
-    .node.video-node { height: 280px; }   /* 视频节点略高，适配竖屏 */
+    .node.gen-node { min-height: var(--node-min-height); }
+    .node.video-node { min-height: 180px; }   /* 视频节点默认略高，JS 按比例覆盖 */
     .node:hover {
       border-color: color-mix(in oklch, var(--node-color) 40%, rgba(255, 255, 255, 0.12));
       box-shadow:
@@ -278,7 +285,7 @@
         0 0 22px color-mix(in oklch, var(--node-color) 30%, transparent),
         inset 0 1px 1px rgba(255, 255, 255, 0.1);
     }
-    .node.dragging { opacity: 0.9; }
+    .node.dragging { opacity: 0.9; cursor: grabbing; }
 
     /* Shift+拖动框选高亮 */
     .node.box-selected {
@@ -400,11 +407,13 @@
     .node-preview-layer video {
       max-width: 100%; max-height: 100%;
       width: 100%; height: 100%;
-      object-fit: cover;
-      cursor: default;
+      object-fit: contain;
+      cursor: grab;
       transition: transform 0.35s var(--ease-out);
     }
     .node-preview-layer img:hover { transform: scale(1.03); }
+    .node.dragging .node-preview-layer img,
+    .node.dragging .node-preview-layer video { cursor: grabbing; }
 
     /* 预览工具栏（悬浮在预览层右上角，默认隐藏，hover 时显示） */
     .node-preview-layer .preview-tools {
@@ -782,6 +791,49 @@
     #node-params-panel .pp-ref-slot.filled .pp-ref-clear { display: inline-flex; }
     #node-params-panel .pp-ref-slot:hover .pp-ref-clear { display: inline-flex; }
     #node-params-panel .pp-ref-slot .pp-ref-empty { text-align: center; padding: 4px; }
+
+    /* 遮罩区域（gpt_image 局部重绘） */
+    #node-params-panel .pp-mask-area { display: flex; flex-direction: column; gap: 6px; }
+    #node-params-panel .pp-mask-preview {
+      position: relative; width: 100%; height: 100px;
+      border: 1px solid var(--border-3); border-radius: var(--r);
+      overflow: hidden; cursor: zoom-in; background: rgba(0,0,0,0.3);
+    }
+    #node-params-panel .pp-mask-preview img { width: 100%; height: 100%; object-fit: contain; }
+    #node-params-panel .pp-mask-empty {
+      width: 100%; height: 80px; border: 1px dashed var(--border-3); border-radius: var(--r);
+      display: flex; align-items: center; justify-content: center; cursor: pointer;
+      transition: border-color var(--dur), background var(--dur);
+    }
+    #node-params-panel .pp-mask-empty:hover { border-color: var(--primary); background: rgba(255,255,255,0.02); }
+
+    /* 历史版本区域 */
+    #node-params-panel .pp-versions {
+      padding: 8px 16px 12px; border-top: 1px solid var(--border-2);
+      max-height: 200px; overflow-y: auto;
+    }
+    #node-params-panel .pp-ver-header {
+      font-size: 11px; font-weight: 600; color: var(--text-3);
+      margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    #node-params-panel .pp-ver-list { display: flex; flex-direction: column; gap: 4px; }
+    #node-params-panel .pp-ver-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px; border-radius: var(--r); cursor: pointer;
+      transition: background var(--dur-fast);
+    }
+    #node-params-panel .pp-ver-item:hover { background: rgba(255,255,255,0.04); }
+    #node-params-panel .pp-ver-thumb {
+      width: 36px; height: 36px; border-radius: 4px; overflow: hidden;
+      background: rgba(0,0,0,0.3); flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #node-params-panel .pp-ver-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    #node-params-panel .pp-ver-noimg { font-size: 9px; color: var(--text-3); }
+    #node-params-panel .pp-ver-info { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+    #node-params-panel .pp-ver-idx { font-size: 11px; font-weight: 600; color: var(--text-1); }
+    #node-params-panel .pp-ver-type { font-size: 10px; color: var(--text-3); }
+    #node-params-panel .pp-ver-time { font-size: 9px; color: var(--text-3); opacity: 0.7; }
     #node-params-panel .pp-error-bar {
       display: flex; align-items: flex-start; gap: 8px;
       padding: 8px 12px; margin: 0 16px;
@@ -1209,6 +1261,84 @@
     }
     #compare-lightbox.show { display: flex; }
     #lightbox-media img, #lightbox-media video { max-width: 92vw; max-height: 92vh; object-fit: contain; border-radius: 6px; }
+
+    /* ═══════════ 素材库面板 ═══════════ */
+    #material-panel {
+      position: fixed; inset: 0; z-index: 3200; display: none;
+      background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+      align-items: center; justify-content: center;
+    }
+    #material-panel.open { display: flex; }
+    #material-panel .mat-box {
+      width: 720px; max-width: 92vw; height: 560px; max-height: 88vh;
+      background: var(--bg-2); border: 1px solid var(--border-2);
+      border-radius: var(--r-lg); overflow: hidden; display: flex; flex-direction: column;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }
+    #material-panel .mat-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; border-bottom: 1px solid var(--border-2);
+    }
+    #material-panel .mat-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
+    #material-panel .mat-close { cursor: pointer; color: var(--text-3); font-size: 14px; padding: 4px 8px; border-radius: 4px; }
+    #material-panel .mat-close:hover { background: rgba(255,255,255,0.06); color: var(--text-1); }
+    #material-panel .mat-tabs {
+      display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--border-2);
+    }
+    #material-panel .mat-tab {
+      padding: 8px 14px; background: none; border: none; border-bottom: 2px solid transparent;
+      color: var(--text-3); font-size: 12px; cursor: pointer; transition: color var(--dur), border-color var(--dur);
+    }
+    #material-panel .mat-tab:hover { color: var(--text-1); }
+    #material-panel .mat-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+    #material-panel .mat-subtabs {
+      display: flex; gap: 6px; padding: 6px 16px; border-bottom: 1px solid var(--border-2);
+    }
+    #material-panel .mat-subtab {
+      padding: 4px 10px; background: none; border: 1px solid transparent; border-radius: var(--r);
+      color: var(--text-3); font-size: 11px; cursor: pointer; transition: all var(--dur);
+    }
+    #material-panel .mat-subtab:hover { background: rgba(255,255,255,0.04); color: var(--text-1); }
+    #material-panel .mat-subtab.active { color: var(--primary); border-color: color-mix(in oklch, var(--primary) 40%, transparent); background: color-mix(in oklch, var(--primary) 8%, transparent); }
+    #material-panel .mat-toolbar { padding: 8px 16px; border-bottom: 1px solid var(--border-2); }
+    #material-panel .mat-btn {
+      padding: 5px 12px; background: color-mix(in oklch, var(--primary) 12%, transparent);
+      border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
+      border-radius: var(--r); color: var(--primary); font-size: 12px; cursor: pointer;
+      transition: background var(--dur);
+    }
+    #material-panel .mat-btn:hover { background: color-mix(in oklch, var(--primary) 20%, transparent); }
+    #material-panel .mat-grid {
+      flex: 1; overflow-y: auto; padding: 12px 16px;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px;
+      align-content: start;
+    }
+    #material-panel .mat-loading {
+      grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-3); font-size: 12px;
+    }
+    #material-panel .mat-item {
+      position: relative; cursor: pointer; border: 1px solid var(--border-2);
+      border-radius: var(--r); overflow: hidden; background: var(--bg-3);
+      transition: border-color var(--dur), transform var(--dur-fast);
+    }
+    #material-panel .mat-item:hover { border-color: var(--primary); transform: translateY(-2px); }
+    #material-panel .mat-thumb {
+      width: 100%; aspect-ratio: 1; overflow: hidden; background: rgba(0,0,0,0.3);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #material-panel .mat-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    #material-panel .mat-name {
+      padding: 4px 6px; font-size: 10px; color: var(--text-3);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #material-panel .mat-del {
+      position: absolute; top: 4px; right: 4px; width: 18px; height: 18px;
+      border-radius: 50%; border: none; background: rgba(0,0,0,0.6); color: #F87171;
+      font-size: 10px; cursor: pointer; opacity: 0; transition: opacity var(--dur);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #material-panel .mat-item:hover .mat-del { opacity: 1; }
+    #material-panel .mat-del:hover { background: rgba(239,68,68,0.4); }
 
     /* ═══════════ minimap 小地图 ═══════════ */
     #minimap {

@@ -87,7 +87,10 @@
     }
     function addNodeAt(type, x, y) {
       pushHistory();
-      const node = { id: uid(), type, x: x-105, y: y-50, data: getDefaultData(type) };
+      // 吸附到网格
+      const nx = snapEnabled ? Math.round((x - 105) / SNAP_GRID) * SNAP_GRID : x - 105;
+      const ny = snapEnabled ? Math.round((y - 50) / SNAP_GRID) * SNAP_GRID : y - 50;
+      const node = { id: uid(), type, x: nx, y: ny, data: getDefaultData(type) };
       canvasData.nodes.push(node);
       renderNode(node);
       updateStatusbar();
@@ -316,6 +319,8 @@
       document.getElementById('nodes-layer').appendChild(el);
       nodeElements[node.id] = el;
       bindNodeEvents(el, node);
+      // 首次渲染时也触发尺寸自适应（页面加载恢复已保存画布）
+      autoFitNodeSize(node, el);
       scheduleMinimap();
       return el;
     }
@@ -599,8 +604,51 @@
       // 更新元信息
       const metaEl = el.querySelector('.node-meta-float');
       if (metaEl) metaEl.innerHTML = buildNodeMeta(node);
+      // 尺寸自适应：图片/视频加载后根据宽高比调整节点高度
+      autoFitNodeSize(node, el);
       // 如果当前参数面板打开的是本节点，同步刷新面板
       if (paramsPanelNodeId === id) renderParamsPanel();
+    }
+
+    /** 根据图片/视频内容的宽高比自适应节点高度 */
+    const NODE_BASE_WIDTH = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--node-width')) || 240;
+    const NODE_MIN_HEIGHT = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--node-min-height')) || 160;
+    const NODE_MAX_HEIGHT = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--node-max-height')) || 420;
+    function autoFitNodeSize(node, el) {
+      const previewEl = el.querySelector('.node-preview-layer');
+      if (!previewEl) return;
+      const media = previewEl.querySelector('img, video');
+      if (!media) {
+        // 无内容时恢复默认高度
+        el.style.height = '';
+        return;
+      }
+      function applyFit() {
+        const naturalW = media.naturalWidth || media.videoWidth || 0;
+        const naturalH = media.naturalHeight || media.videoHeight || 0;
+        if (!naturalW || !naturalH) return;
+        const ratio = naturalH / naturalW;
+        const fitH = Math.round(Math.max(NODE_MIN_HEIGHT, Math.min(NODE_MAX_HEIGHT, NODE_BASE_WIDTH * ratio)));
+        // 吸附到网格
+        const snappedH = Math.round(fitH / SNAP_GRID) * SNAP_GRID;
+        if (el.offsetHeight !== snappedH) {
+          el.style.height = snappedH + 'px';
+          // 高度变化后重绘连线
+          const aff = canvasData.connections.filter(c => c.from === node.id || c.to === node.id);
+          if (aff.length) renderConnections();
+          // 参数面板跟随
+          if (paramsPanelNodeId === node.id) positionParamsPanel();
+        }
+      }
+      if (media.tagName === 'VIDEO') {
+        // 视频：等 loadedmetadata
+        if (media.readyState >= 1) { applyFit(); }
+        else { media.addEventListener('loadedmetadata', applyFit, { once: true }); }
+      } else {
+        // 图片：等 complete 或 onload
+        if (media.complete && media.naturalWidth) { applyFit(); }
+        else { media.addEventListener('load', applyFit, { once: true }); }
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -823,8 +871,11 @@
     function renderConnections() {
       const svg = document.getElementById('svg-layer');
       const temp = svg.querySelector('.conn-temp');
+      // 保留吸附辅助线，innerHTML 清除后恢复
+      const savedGuides = svg.querySelectorAll('.snap-guide');
       svg.innerHTML = '';
       if (temp) svg.appendChild(temp);
+      savedGuides.forEach(g => svg.appendChild(g));
       for (const conn of canvasData.connections) {
         const fn = canvasData.nodes.find(n=>n.id===conn.from);
         const tn = canvasData.nodes.find(n=>n.id===conn.to);
@@ -860,13 +911,97 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // 节点吸附 & 对齐辅助线
+    // ═══════════════════════════════════════════════════════════════
+    let snapGuides = [];  // 当前吸附辅助线 [{axis:'x'|'y', pos, type}]
+
+    /** 计算吸附：网格吸附 + 节点间对齐 */
+    function calcSnap(dragNode, el, rawX, rawY) {
+      if (!snapEnabled) return { x: rawX, y: rawY, guides: [] };
+      let x = rawX, y = rawY;
+      const guides = [];
+      const w = el.offsetWidth, h = el.offsetHeight;
+      // ── 网格吸附 ──
+      x = Math.round(x / SNAP_GRID) * SNAP_GRID;
+      y = Math.round(y / SNAP_GRID) * SNAP_GRID;
+      // ── 节点间对齐吸附 ──
+      const dragCenterX = x + w / 2;
+      const dragCenterY = y + h / 2;
+      let bestDx = SNAP_THRESHOLD + 1, bestDy = SNAP_THRESHOLD + 1;
+      let snapX = null, snapY = null;
+      let guideX = null, guideY = null;
+      for (const n of canvasData.nodes) {
+        if (n.id === dragNode.id) continue;
+        const nel = nodeElements[n.id];
+        if (!nel) continue;
+        const nw = nel.offsetWidth, nh = nel.offsetHeight;
+        const ncx = n.x + nw / 2, ncy = n.y + nh / 2;
+        // X 轴对齐：左-左、中-中、右-右
+        const pairsX = [
+          { dv: x, nv: n.x, t: 'l' },
+          { dv: dragCenterX, nv: ncx, t: 'c' },
+          { dv: x + w, nv: n.x + nw, t: 'r' },
+        ];
+        for (const p of pairsX) {
+          const d = Math.abs(p.dv - p.nv);
+          if (d < bestDx) { bestDx = d; snapX = p.nv - (p.t === 'l' ? 0 : p.t === 'c' ? w/2 : w); guideX = { axis: 'x', pos: p.nv, type: p.t }; }
+        }
+        // Y 轴对齐：上-上、中-中、下-下
+        const pairsY = [
+          { dv: y, nv: n.y, t: 't' },
+          { dv: dragCenterY, nv: ncy, t: 'c' },
+          { dv: y + h, nv: n.y + nh, t: 'b' },
+        ];
+        for (const p of pairsY) {
+          const d = Math.abs(p.dv - p.nv);
+          if (d < bestDy) { bestDy = d; snapY = p.nv - (p.t === 't' ? 0 : p.t === 'c' ? h/2 : h); guideY = { axis: 'y', pos: p.nv, type: p.t }; }
+        }
+      }
+      if (bestDx <= SNAP_THRESHOLD) { x = snapX; guides.push(guideX); }
+      if (bestDy <= SNAP_THRESHOLD) { y = snapY; guides.push(guideY); }
+      return { x, y, guides };
+    }
+
+    /** 渲染/清除吸附辅助线（在 SVG 层中） */
+    function renderSnapGuides(guides) {
+      clearSnapGuides();
+      const svg = document.getElementById('svg-layer');
+      if (!svg) return;
+      for (const g of guides) {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('class', 'snap-guide');
+        line.setAttribute('stroke', 'var(--primary)');
+        line.setAttribute('stroke-width', '1');
+        line.setAttribute('stroke-dasharray', '4 4');
+        line.setAttribute('opacity', '0.6');
+        if (g.axis === 'x') {
+          line.setAttribute('x1', g.pos); line.setAttribute('y1', -5000);
+          line.setAttribute('x2', g.pos); line.setAttribute('y2', 5000);
+        } else {
+          line.setAttribute('x1', -5000); line.setAttribute('y1', g.pos);
+          line.setAttribute('x2', 5000);  line.setAttribute('y2', g.pos);
+        }
+        svg.appendChild(line);
+      }
+      snapGuides = guides;
+    }
+    function clearSnapGuides() {
+      const svg = document.getElementById('svg-layer');
+      if (!svg) return;
+      svg.querySelectorAll('.snap-guide').forEach(l => l.remove());
+      snapGuides = [];
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // 节点交互
     // ═══════════════════════════════════════════════════════════════
     function bindNodeEvents(el, node) {
-      const dragHandle = el.querySelector('.node-title-float');
-      if (dragHandle) {
-        dragHandle.addEventListener('mousedown', (e) => {
+      // ── 整卡拖动（排除端口、删除按钮、预览工具等交互元素） ──
+      el.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
+        // 排除端口、删除按钮、预览工具按钮
+        if (e.target.classList.contains('port') || e.target.closest('.port')) return;
+        if (e.target.closest('.node-delete') || e.target.closest('.pv-tool')) return;
         e.stopPropagation();
         if (e.shiftKey) { toggleNodeBoxSelection(node.id); return; }
         selectedNode = node.id;
@@ -878,10 +1013,17 @@
         const snapBefore = snapshotCanvas();
         let moved = false;
         function mv(ev) {
-          node.x = ox + (ev.clientX-sx)/viewScale;
-          node.y = oy + (ev.clientY-sy)/viewScale;
+          // Ctrl 键临时禁用吸附
+          const prevSnap = snapEnabled;
+          snapEnabled = !ev.ctrlKey;
+          let rawX = ox + (ev.clientX-sx)/viewScale;
+          let rawY = oy + (ev.clientY-sy)/viewScale;
+          const s = calcSnap(node, el, rawX, rawY);
+          node.x = s.x; node.y = s.y;
+          snapEnabled = prevSnap;
           if (!moved && (node.x !== ox || node.y !== oy)) moved = true;
           el.style.left = node.x+'px'; el.style.top = node.y+'px';
+          renderSnapGuides(s.guides);
           const aff = canvasData.connections.filter(c=>c.from===node.id||c.to===node.id);
           if (aff.length) renderConnections();
           // 参数面板跟随当前拖拽节点
@@ -889,6 +1031,7 @@
         }
         function up() {
           el.classList.remove('dragging');
+          clearSnapGuides();
           document.removeEventListener('mousemove', mv);
           document.removeEventListener('mouseup', up);
           if (moved) {
@@ -896,13 +1039,17 @@
             if (undoStack.length > MAX_HISTORY) undoStack.shift();
             redoStack = [];
             updateUndoRedoButtons();
+            // 拖拽后阻止 click 事件误触参数面板
+            el.addEventListener('click', function suppress(ev) {
+              ev.stopPropagation(); ev.preventDefault();
+              el.removeEventListener('click', suppress, true);
+            }, true);
           }
           autoSave();
         }
         document.addEventListener('mousemove', mv);
         document.addEventListener('mouseup', up);
-        });
-      }
+      });
       const outPorts = el.querySelectorAll('.port-out');
       outPorts.forEach(p => {
         p.addEventListener('mousedown', (e) => {
@@ -910,17 +1057,6 @@
           isConnecting = true;
           connStart = { nodeId: node.id, portName: p.dataset.portname };
         });
-      });
-      // 节点主体点击：选中 + 打开参数面板
-      el.addEventListener('mousedown', (e) => {
-        if (e.target.classList.contains('port') || e.target.closest('.node-title-float')) return;
-        if (e.target.closest('.node-delete') || e.target.closest('.pv-tool')) return;  // 删除/预览工具按钮
-        if (e.shiftKey) { e.stopPropagation(); e.preventDefault(); toggleNodeBoxSelection(node.id); return; }
-        selectedNode = node.id;
-        clearBoxSelection();
-        updateRunSelectedBtn();
-        document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
-        el.classList.add('selected');
       });
       // 单击（不拖拽时）：打开参数面板
       el.addEventListener('click', (e) => {
@@ -1025,6 +1161,7 @@
           <span class="pp-error-msg">${node.data._error.replace(/^\[[A-Z]\d+\]\s*/, '')}</span>
         </div>` : ''}
         <div class="pp-body">${renderParamsBody(node)}</div>
+        ${renderVersionsSection(node)}
       `;
       // 绑定拖动整个面板（点击顶部标题栏）
       const header = paramsPanelEl.querySelector('.pp-header');
@@ -1053,6 +1190,30 @@
       }
       document.addEventListener('mousemove', mv);
       document.addEventListener('mouseup', up);
+    }
+
+    // ─── 历史版本区域 ───
+    function renderVersionsSection(node) {
+      const versions = node.data._versions;
+      if (!versions || versions.length === 0) return '';
+      const items = versions.slice().reverse().map((v, i) => {
+        const idx = versions.length - i;
+        const time = new Date(v.created_at).toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+        const thumb = v.video_url || v.image_url || v.mask_url;
+        const label = v.video_url ? '视频' : v.image_url ? '图片' : '遮罩';
+        return `<div class="pp-ver-item" onclick="restoreVersion('${node.id}','${v.id}')">
+          <div class="pp-ver-thumb">${thumb ? `<img src="${thumb}"/>` : '<span class="pp-ver-noimg">无预览</span>'}</div>
+          <div class="pp-ver-info">
+            <span class="pp-ver-idx">v${idx}</span>
+            <span class="pp-ver-type">${label}</span>
+            <span class="pp-ver-time">${time}</span>
+          </div>
+        </div>`;
+      }).join('');
+      return `<div class="pp-versions">
+        <div class="pp-ver-header">历史版本 (${versions.length})</div>
+        <div class="pp-ver-list">${items}</div>
+      </div>`;
     }
 
     // 按节点类型渲染参数字段
@@ -1296,6 +1457,23 @@
         <div class="pp-field span-3">
           <div class="pp-label">参考图</div>
           <div class="pp-refs">${refsHtml}</div>
+        </div>
+        <div class="pp-field span-3">
+          <div class="pp-label">遮罩 · Mask（局部重绘）</div>
+          <div class="pp-mask-area">
+            ${d.mask_url
+              ? `<div class="pp-mask-preview" onclick="openLightbox('${d.mask_url}')">
+                   <img src="${d.mask_url}"/>
+                   <button class="pp-ref-clear" onclick="event.stopPropagation();clearNodeField('${nid}','mask_url')">✕</button>
+                 </div>
+                 <div class="pp-hint">已配置遮罩，将走 inpaint 局部重绘</div>`
+              : `<div class="pp-mask-empty" onclick="document.getElementById('pp-up-mask-${nid}').click()">
+                   <div class="pp-ref-empty">＋ 上传遮罩</div>
+                 </div>
+                 <input id="pp-up-mask-${nid}" type="file" accept="image/*" style="display:none"
+                        onchange="uploadRefImage('${nid}','mask_url',this)"/>
+                 <div class="pp-hint">上传遮罩后启用局部重绘（白色=重绘区域）</div>`}
+          </div>
         </div>
         <div class="pp-field span-3" style="flex-direction:row;gap:8px;">
           <button class="pp-btn" onclick="polishPrompt('${nid}')">✨ 润色</button>
@@ -2003,6 +2181,44 @@
     function stopCanvasPolling() {
       if (canvasPollTimer) { clearInterval(canvasPollTimer); canvasPollTimer = null; renderConnections(); }
     }
+    // ─── 节点版本历史 ───
+    function saveNodeVersion(node, runtimeData) {
+      if (!node.data._versions) node.data._versions = [];
+      const ver = {
+        id: uid(),
+        created_at: new Date().toISOString(),
+        image_url: runtimeData.image_url || node.data.image_url || null,
+        video_url: runtimeData.video_url || node.data.video_url || null,
+        mask_url: runtimeData.mask_url || node.data.mask_url || null,
+        params: JSON.parse(JSON.stringify({
+          prompt: node.data.prompt,
+          model: node.data.model,
+          size: node.data.size,
+          aspect_ratio: node.data.aspect_ratio,
+          resolution: node.data.resolution,
+          mask_mode: node.data.mask_mode,
+        }))
+      };
+      node.data._versions.push(ver);
+      // 限制最多 20 个版本
+      if (node.data._versions.length > 20) node.data._versions.shift();
+      autoSave();
+    }
+    function restoreVersion(nodeId, versionId) {
+      const node = canvasData.nodes.find(n => n.id === nodeId);
+      if (!node) return;
+      const ver = node.data._versions?.find(v => v.id === versionId);
+      if (!ver) return;
+      if (ver.image_url) node.data.image_url = ver.image_url;
+      if (ver.video_url) node.data.video_url = ver.video_url;
+      if (ver.mask_url) node.data.mask_url = ver.mask_url;
+      refreshNodePreview(nodeId);
+      autoSave();
+      showToast('已切换到历史版本');
+      if (paramsPanelNodeId === nodeId) renderParamsPanel();
+    }
+    window.restoreVersion = restoreVersion;
+
     function updateNodeUI(nodeId, d) {
       const prevStatus = nodeRuntime[nodeId]?.status;
       nodeRuntime[nodeId] = { status: d.status, progress: d.progress, image_url: d.image_url, video_url: d.video_url, mask_url: d.mask_url };
@@ -2019,6 +2235,10 @@
         if (d.width) { node.data._width = d.width; changed = true; }
         if (d.height) { node.data._height = d.height; changed = true; }
         if (changed) refreshNodePreview(nodeId);
+        // 成功时保存版本快照
+        if (d.status === 'success' && prevStatus !== 'success') {
+          saveNodeVersion(node, d);
+        }
       }
       if (d.error) { const node2 = canvasData.nodes.find(n=>n.id===nodeId); if(node2) { node2.data._error = d.error; refreshNodePreview(nodeId); } }
         // 失败时即时 toast + 自动打开参数面板展示错误

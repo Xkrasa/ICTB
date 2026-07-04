@@ -261,6 +261,23 @@
     <div id="lightbox-media"></div>
   </div>
 
+  <!-- 素材库面板 -->
+  <div id="material-panel" onclick="if(event.target===this)closeMaterialPanel()">
+    <div class="mat-box">
+      <div class="mat-header">
+        <span class="mat-title">素材库</span>
+        <span class="mat-close" onclick="closeMaterialPanel()">✕</span>
+      </div>
+      <div class="mat-tabs" id="mat-tabs"></div>
+      <div class="mat-subtabs" id="mat-subtabs"></div>
+      <div class="mat-toolbar">
+        <button class="mat-btn" onclick="uploadMaterial()">＋ 上传素材</button>
+        <input id="mat-upload-input" type="file" accept="image/*" style="display:none" onchange="handleMaterialUpload(this)"/>
+      </div>
+      <div class="mat-grid" id="mat-grid"></div>
+    </div>
+  </div>
+
   <!-- minimap 小地图 -->
   <div id="minimap" onclick="onMinimapClick(event)">
     <div id="minimap-content"></div>
@@ -309,13 +326,13 @@
       <div class="sp-item" onclick="addNodeFromPanel('image_input')">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1v14M1 8h14"/></svg>上传
       </div>
-      <div class="sp-item" style="opacity:0.45;cursor:not-allowed;">
+      <div class="sp-item" onclick="openMaterialPanel('real')">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="3"/><path d="M2 15c0-4 3-6 6-6s6 2 6 6"/></svg>真人素材
       </div>
-      <div class="sp-item" style="opacity:0.45;cursor:not-allowed;">
+      <div class="sp-item" onclick="openMaterialPanel('virtual')">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="3"/><path d="M14 15c0-4-2.5-6-6-6s-6 2-6 6"/><path d="M12 5c0-2.5-1.8-4-4-4"/></svg>虚拟素材
       </div>
-      <div class="sp-item" style="opacity:0.45;cursor:not-allowed;">
+      <div class="sp-item" onclick="openMaterialPanel('group')">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="6" cy="6" r="4"/><path d="M10 10l5 5"/></svg>团播素材<span class="arrow">›</span>
       </div>
     </div>
@@ -326,6 +343,7 @@
   <script src="/static/js/canvas.js"></script>
   <script src="/static/js/ops.js"></script>
   <script src="/static/js/project.js"></script>
+  <script src="/static/js/material.js"></script>
   <script src="/static/js/init.js"></script>
 </body>
 </html>

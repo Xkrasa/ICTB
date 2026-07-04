@@ -74,6 +74,13 @@
     };
     const STATUS_LABELS = { idle:'待机', pending:'排队', running:'运行中', success:'完成', failed:'失败', blocked:'阻断', awaiting_approval:'待批准' };
 
+// ═══════════════════════════════════════════════════════════════
+// 节点吸附配置（从 CSS 变量同步，与 #grid-bg background-size 一致）
+// ═══════════════════════════════════════════════════════════════
+const SNAP_GRID = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--snap-grid')) || 24;
+const SNAP_THRESHOLD = 8;       // 节点间对齐吸附阈值（px，画布坐标）
+let snapEnabled = true;         // 吸附开关（可 Ctrl 拖拽临时禁用）
+
 
 // ═══ 命名空间容器：各模块函数挂载点 ═══
 // 各模块文件末尾用 Object.assign 把声明式函数挂到对应命名空间做索引。

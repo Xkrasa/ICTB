@@ -29,6 +29,8 @@ STREAMER_DIR = Path("streamers")
 STREAMER_DIR.mkdir(exist_ok=True)
 TEMPLATE_DIR = Path("templates")
 TEMPLATE_DIR.mkdir(exist_ok=True)
+MATERIAL_DIR = Path("materials")
+MATERIAL_DIR.mkdir(exist_ok=True)
 from storage import storage
 
 
@@ -196,6 +198,66 @@ async def upload_asset(file: UploadFile = File(...)):
     ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() or "bin"
     url = await storage.save(data, ext)
     return AssetUploadResponse(url=url)
+
+
+# ───────────────────────── 素材库 ─────────────────────────
+
+VALID_CATEGORIES = {"real", "virtual", "group"}
+VALID_SUBCATEGORIES = {"streamer", "hair", "clothing", "background"}
+
+
+class MaterialCreateRequest(BaseModel):
+    url: str
+    category: str
+    subcategory: str = ""
+    name: str = ""
+
+
+@app.get("/api/materials")
+async def material_list(category: str = "", subcategory: str = ""):
+    """列出素材，可按 category/subcategory 过滤"""
+    items = []
+    for f in sorted(MATERIAL_DIR.glob("mat_*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            m = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, KeyError):
+            continue
+        if category and m.get("category") != category:
+            continue
+        if subcategory and m.get("subcategory") != subcategory:
+            continue
+        items.append(m)
+    return {"materials": items}
+
+
+@app.post("/api/materials")
+async def material_create(req: MaterialCreateRequest):
+    """新建素材记录（url 来自 /api/assets/upload）"""
+    if req.category not in VALID_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"无效分类，可选: {VALID_CATEGORIES}")
+    if req.subcategory and req.subcategory not in VALID_SUBCATEGORIES:
+        raise HTTPException(status_code=400, detail=f"无效子分类，可选: {VALID_SUBCATEGORIES}")
+    mid = "mat_" + uuid.uuid4().hex[:10]
+    data = {
+        "id": mid,
+        "url": req.url,
+        "category": req.category,
+        "subcategory": req.subcategory if req.category == "group" else "",
+        "name": req.name or f"素材-{mid[-4:]}",
+        "created_at": time.time(),
+    }
+    (MATERIAL_DIR / f"{mid}.json").write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return data
+
+
+@app.delete("/api/materials/{mid}")
+async def material_delete(mid: str):
+    f = MATERIAL_DIR / f"{mid}.json"
+    if f.exists():
+        f.unlink()
+    return {"ok": True}
 
 
 # ---- Phase 2 画布路由 ----
