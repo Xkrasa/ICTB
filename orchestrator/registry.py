@@ -132,6 +132,8 @@ class TaskRegistry:
             return True
         return False
 
+    # ───────────────────────── 持久化层（CRUD）─────────────────────────
+
     def get(self, task_id: str) -> dict | None:
         return self._tasks.get(task_id)
 
@@ -149,8 +151,9 @@ class TaskRegistry:
             self._persist(task_id, rec)
         return rec
 
-    def list_by_workflow(self, workflow_id: str) -> list:
-        return [r for r in self._tasks.values() if r["workflow_id"] == workflow_id]
+    # ───────────────────────── 查询层（域查询，薄封装）─────────────────────────
+    # 这两个方法遍历内存缓存做域特定查询。若未来存储换 NAS/TOS 或查询变复杂，
+    # 可提取为独立 CanvasQuery 类（需 TaskStore 暴露 iter_all 接口）。
 
     def find_canvas_image_url(self, canvas_id: str, exclude_node_id: str) -> str | None:
         """在同一个 canvas 中查找可作为上游输入的 image_url。
