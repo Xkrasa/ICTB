@@ -258,7 +258,7 @@
       return blocking;
     }
     function cloneChain() {
-      if (!selectedNode) { alert('请先选中一条链路中的任意节点'); return; }
+      if (!selectedNode) { showToast('请先选中一条链路中的任意节点'); return; }
       pushHistory();
       const chainNodes = getChainNodeIds(selectedNode);
       // 克隆节点
@@ -614,7 +614,7 @@
         const d = await r.json();
         const node = canvasData.nodes.find(n=>n.id===nodeId);
         if (node) { node.data.image_url = d.url; refreshNodePreview(nodeId); autoSave(); }
-      } catch(e) { alert('上传失败: '+e.message); }
+      } catch(e) { showToast('上传失败: '+e.message); }
     }
     async function uploadRefImage(nodeId, field, input) {
       const file = input.files[0]; if(!file) return;
@@ -624,7 +624,7 @@
         const d = await r.json();
         const node = canvasData.nodes.find(n=>n.id===nodeId);
         if (node) { node.data[field] = d.url; refreshNodePreview(nodeId); autoSave(); }
-      } catch(e) { alert('上传失败: '+e.message); }
+      } catch(e) { showToast('上传失败: '+e.message); }
       input.value = '';
     }
     function clearNodeField(nodeId, field) {
@@ -654,7 +654,7 @@
         const up = getUpstreamByPort(nodeId, 'image');
         if (up) imageUrl = (nodeRuntime[up.node.id]?.image_url) || up.node.data.image_url;
       }
-      if (!imageUrl) { alert('请先连线上游图片输入节点'); return; }
+      if (!imageUrl) { showToast('请先连线上游图片输入节点'); return; }
       maskEditorNodeId = nodeId;
       maskEraser = false;
       const eraserBtn = document.getElementById('eraser-btn');
@@ -798,7 +798,7 @@
             autoSave();
           }
           closeMaskEditor();
-        } catch(e) { alert('遮罩上传失败: ' + e.message); }
+        } catch(e) { showToast('遮罩上传失败: ' + e.message); }
       }, 'image/png');
     }
 
@@ -1561,14 +1561,14 @@
       } else if (selectedNode) {
         nodeIds = [selectedNode];
       } else {
-        alert('请先选择节点（单击选中运行链路，或 Shift+框选运行部分）');
+        showToast('请先选择节点（单击选中运行链路，或 Shift+框选运行部分）');
         return;
       }
       // 严格检查前置依赖：必须所有直接上游都成功完成才能运行
       const blocking = findBlockingUpstreams(nodeIds);
       if (blocking.length > 0) {
         const names = blocking.map(b => `${b.title}(${b.id.slice(0,6)})`).join('、');
-        alert(`以下上游节点尚未完成，请先运行它们：\n${names}\n\n补齐后再点击「运行选中」。`);
+        showToast(`以下上游节点尚未完成，请先运行它们：\n${names}\n\n补齐后再点击「运行选中」。`);
         return;
       }
       runCanvas(nodeIds);
@@ -1879,6 +1879,19 @@
     // ═══════════════════════════════════════════════════════════════
     // 运行画布
     // ═══════════════════════════════════════════════════════════════
+    // ═══════════ toast 消息条 ═══════════
+    function showToast(msg, type) {
+      type = type || 'info';
+      var box = document.getElementById('toast-container');
+      if (!box) { box = document.createElement('div'); box.id = 'toast-container'; document.body.appendChild(box); }
+      var el = document.createElement('div');
+      el.className = 'toast ' + type;
+      el.textContent = msg;
+      box.appendChild(el);
+      var ms = type === 'error' ? 5000 : 3000;
+      setTimeout(function(){ el.classList.add('fade-out'); setTimeout(function(){ el.remove(); }, 300); }, ms);
+    }
+
     async function runCanvas(nodeIds) {
       // nodeIds 可选：不传=运行全部；传=只运行该子集节点
       // 后端根据 canvas_id 查找上游历史产物，无需前端注入补丁
@@ -1889,7 +1902,7 @@
         nodes = canvasData.nodes.filter(n => runSet.has(n.id));
         conns = canvasData.connections.filter(c => runSet.has(c.from) && runSet.has(c.to));
       }
-      if (nodes.length === 0) { alert('没有可运行的节点'); return; }
+      if (nodes.length === 0) { showToast('没有可运行的节点', 'error'); return; }
 
       Object.keys(pollTimers).forEach(stopPolling);
       const r = await _apiFetch('/api/canvas/run', {
@@ -1908,14 +1921,16 @@
           approval_mode: approvalMode,                              // 批准模式开关
         })
       });
+      if (!r.ok) { showToast('提交失败: HTTP ' + r.status, 'error'); return; }
       const d = await r.json();
       currentCanvasId = d.canvas_id;
       nodeRuntime = {};
       for (const n of nodes) { nodeRuntime[n.id] = { status:'pending', progress:0 }; startPolling(n.id); }
       updateStatusbar('running');
+      showToast('已提交 ' + nodes.length + ' 个节点运行', 'info');
     }
     function runChain() {
-      if (!selectedNode) { alert('请先选中要运行的链路中的任意节点'); return; }
+      if (!selectedNode) { showToast('请先选中要运行的链路中的任意节点'); return; }
       runCanvas([...getChainNodeIds(selectedNode)]);
     }
 
@@ -1939,18 +1954,18 @@
       if (!currentCanvasId) return;
       try {
         const r = await _apiFetch(`/api/canvas/${currentCanvasId}/approve/${nodeId}`, { method: 'POST' });
-        if (!r.ok) { const d = await r.json(); alert(d.detail || '批准失败'); return; }
+        if (!r.ok) { const d = await r.json(); showToast(d.detail || '批准失败'); return; }
         startPolling(nodeId); // 级联执行后下游节点会自动进入 pending/running
         updateNodeUI(nodeId, { status: 'success', progress: 100, image_url: nodeRuntime[nodeId]?.image_url, video_url: nodeRuntime[nodeId]?.video_url, mask_url: nodeRuntime[nodeId]?.mask_url });
-      } catch(e) { alert('批准请求失败'); }
+      } catch(e) { showToast('批准请求失败'); }
     }
     async function rejectNode(nodeId) {
       if (!currentCanvasId) return;
       try {
         const r = await _apiFetch(`/api/canvas/${currentCanvasId}/reject/${nodeId}`, { method: 'POST' });
-        if (!r.ok) { const d = await r.json(); alert(d.detail || '拒绝失败'); return; }
+        if (!r.ok) { const d = await r.json(); showToast(d.detail || '拒绝失败'); return; }
         updateNodeUI(nodeId, { status: 'failed', progress: 100, error: '用户拒绝该生成结果' });
-      } catch(e) { alert('拒绝请求失败'); }
+      } catch(e) { showToast('拒绝请求失败'); }
     }
     window.toggleApprovalMode = toggleApprovalMode;
     window.approveNode = approveNode;
@@ -2006,9 +2021,10 @@
         if (changed) refreshNodePreview(nodeId);
       }
       if (d.error) { const node2 = canvasData.nodes.find(n=>n.id===nodeId); if(node2) { node2.data._error = d.error; refreshNodePreview(nodeId); } }
-        // 失败时自动打开参数面板展示错误
-        if (d.status === 'failed' && !paramsPanelNodeId) {
-          openParamsPanel(nodeId);
+        // 失败时即时 toast + 自动打开参数面板展示错误
+        if (d.status === 'failed' && prevStatus !== 'failed') {
+          showToast('节点 #' + nodeId.slice(0,6) + ' 失败: ' + (d.error || '未知错误').slice(0, 60), 'error');
+          if (!paramsPanelNodeId) openParamsPanel(nodeId);
         }
       // 状态变化时刷新连线颜色
       if (prevStatus !== d.status) renderConnections();
@@ -2047,6 +2063,15 @@
     function checkAllDone() {
       if (!canvasPollTimer) {
         updateStatusbar('done');
+        // 聚合完成 toast
+        var succ = 0, fail = 0;
+        for (var nid in nodeRuntime) {
+          var s = nodeRuntime[nid] && nodeRuntime[nid].status;
+          if (s === 'success') succ++;
+          else if (s === 'failed' || s === 'blocked' || s === 'interrupted') fail++;
+        }
+        if (fail > 0) showToast('完成：成功 ' + succ + ' / 失败 ' + fail, fail > succ ? 'error' : 'info');
+        else showToast('全部完成（' + succ + ' 个节点）', 'success');
         const outputs = getCompareOutputs();
         if (outputs.length >= 2) showCompare();
       }
@@ -2176,7 +2201,7 @@
       activeCanvasId = d.id;
       canvasData.name = d.name;
       refreshProjectDrawer();
-      alert(`已${isUpdate ? '更新' : '保存'}：${d.name}（${d.id}）`);
+      showToast(`已${isUpdate ? '更新' : '保存'}：${d.name}（${d.id}）`);
     }
     async function newProject() {
       if (!confirm('新建项目会清空当前画布，是否继续？')) return;
@@ -2198,12 +2223,12 @@
     async function cloneCanvas(id) {
       try {
         const r = await _apiFetch(`/api/canvas/${id}/clone`, { method: 'POST' });
-        if (!r.ok) { alert('复制失败'); return; }
+        if (!r.ok) { showToast('复制失败'); return; }
         const d = await r.json();
         loadCanvasList();
         refreshProjectDrawer();
-        alert(`已复制为新项目：${d.name}（${d.id}）`);
-      } catch(e) { alert('复制失败：' + e.message); }
+        showToast(`已复制为新项目：${d.name}（${d.id}）`);
+      } catch(e) { showToast('复制失败：' + e.message); }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2326,5 +2351,6 @@ Object.assign(TuanboApp.canvas, {
   newProject: newProject,
   cloneCanvas: cloneCanvas,
   startCanvasPolling: startCanvasPolling,
+  showToast: showToast,
   stopCanvasPolling: stopCanvasPolling,
 });

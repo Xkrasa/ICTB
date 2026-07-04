@@ -55,7 +55,15 @@ async def api_key_auth(request: Request, call_next):
     return await call_next(request)
 
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+class NoCacheStaticFiles(StaticFiles):
+    """静态文件加 no-cache header，避免浏览器缓存旧 JS/CSS（开发期频繁更新）。"""
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return response
+
+
+app.mount("/static", NoCacheStaticFiles(directory="static"), name="static")
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 
