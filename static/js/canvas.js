@@ -97,10 +97,10 @@
     function getDefaultData(type) {
       switch (type) {
         case 'image_input': return { image_url: null };
-        case 'gpt_image': return { prompt:'', hair_url:'', makeup:'', clothing_url:'', model:'gpt-image-2', size:'1024x1024', image1:'', image2:'', image2_url:'', image3_url:'', image4_url:'' };
+        case 'gpt_image': return { prompt:'', hair_url:'', makeup:'', clothing_url:'', model:'gpt-image-2', size:'1024x1024', image1:'', image2:'', image2_url:'', image3_url:'', image4_url:'', mj_version:'Midjourney V7' };
         case 'remove_bg': return {};
         case 'mask_edit': return { mask_url: null, mask_mode: 'auto_face' };
-        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16', channel:'official', first_frame:'', last_frame:'', image_url:'', image2_url:'', resolution:'480p' };
+        case 'seedance_video': return { prompt:'', duration:'8', aspect_ratio:'9:16', channel:'official', first_frame:'', last_frame:'', image_url:'', image2_url:'', resolution:'480p', video_url:'', generate_audio:false, real_person_mode:false };
         default: return {};
       }
     }
@@ -134,6 +134,54 @@
         aspectRatios: ['9:16', '16:9', '1:1', '4:3', '3:4', '4:5'],
         defaultAspect: '9:16',
         cost: 'Nano Banana 2.0'
+      },
+      'rh_gpt_image_official': {
+        label: 'RH gpt稳定版',
+        resolutions: ['1k', '2k', '4k'],
+        defaultRes: '2k',
+        aspectRatios: ['1:1','1:2','2:1','1:3','3:1','2:3','3:2','3:4','4:3','4:5','5:4','9:16','21:9','9:21','16:9'],
+        defaultAspect: '9:16',
+        qualities: ['low', 'medium', 'high'],
+        defaultQuality: 'medium',
+        cost: 'RH 稳定版'
+      },
+      'flux_klein_9b': {
+        label: 'FLUX Klein 9B',
+        aspectRatios: ['1:1','3:4','4:3','9:16','16:9','2:3','3:2','auto'],
+        defaultAspect: '1:1',
+        cost: 'FLUX.2 Klein 9B 编辑'
+      },
+      'seedream_v4': {
+        label: 'Seedream V4',
+        resolutions: ['1k', '2k', '4k'],
+        defaultRes: '2k',
+        cost: 'Seedream V4 图生图'
+      },
+      'seedream_v5_lite': {
+        label: 'Seedream V5 Lite',
+        resolutions: ['2k', '3k'],
+        defaultRes: '2k',
+        cost: 'Seedream V5 Lite 图生图'
+      },
+      'midjourney_v7': {
+        label: 'Midjourney V7',
+        aspectRatios: ['auto','1:1','16:9','16:10','4:3','3:2','9:16','10:16','3:4','2:3'],
+        defaultAspect: '3:4',
+        mjVersions: ['Midjourney V7','Midjourney V6.1','Midjourney V6','Midjourney V5.2','Midjourney V5.1','Niji V5','Niji V6'],
+        defaultMjVersion: 'Midjourney V7',
+        cost: 'MJ V7 文生图'
+      },
+      'flux2': {
+        label: 'FLUX2 图生图',
+        aspectRatios: ['1:1','9:16','16:9','4:3','3:4','3:2','2:3'],
+        defaultAspect: '9:16',
+        cost: 'FLUX2 图生图'
+      },
+      'krea2': {
+        label: 'Krea2 满血版',
+        aspectRatios: ['1:1 (Square)','2:3 (Portrait Photo)','3:2 (Photo)','3:4 (Portrait Standard)','4:3 (Standard)','9:16 (Portrait Widescreen)','16:9 (Widescreen)','21:9 (Ultrawide)'],
+        defaultAspect: '9:16 (Portrait Widescreen)',
+        cost: 'Krea2 文生图'
       }
     };
     function removeNode(id) {
@@ -178,11 +226,20 @@
     // 获取连到指定目标端口的 upstream 信息 { node, fromField, conn }
     function getUpstreamByPort(nodeId, toField) {
       const conns = canvasData.connections.filter(c => c.to === nodeId);
-      const conn = conns.find(c => c.toField === toField) || conns[0];
-      if (!conn) return null;
-      const node = canvasData.nodes.find(n => n.id === conn.from);
-      if (!node) return null;
-      return { node, fromField: conn.fromField, conn };
+      if (conns.length === 0) return null;
+      // 优先按 toField 精确匹配
+      const conn = conns.find(c => c.toField === toField);
+      if (conn) {
+        const node = canvasData.nodes.find(n => n.id === conn.from);
+        return node ? { node, fromField: conn.fromField, conn } : null;
+      }
+      // 兼容旧连线（无 toField）：仅当所有连线都无 toField 时 fallback 到第一条
+      if (conns.every(c => !c.toField)) {
+        const fallback = conns[0];
+        const node = canvasData.nodes.find(n => n.id === fallback.from);
+        return node ? { node, fromField: fallback.fromField, conn: fallback } : null;
+      }
+      return null; // 有带 toField 的连线但不匹配此端口 → 无上游
     }
     function findBlockingUpstreams(nodeIds) {
       const blocking = [];
@@ -484,8 +541,8 @@
         if (!cfg.sizes.includes(node.data.size)) node.data.size = cfg.defaultSize;
         return;
       }
-      if (!cfg.resolutions.includes(node.data.resolution)) node.data.resolution = cfg.defaultRes;
-      if (!cfg.aspectRatios.includes(node.data.aspect_ratio)) node.data.aspect_ratio = cfg.defaultAspect;
+      if (!cfg.resolutions || !cfg.resolutions.includes(node.data.resolution)) node.data.resolution = cfg.defaultRes;
+      if (!cfg.aspectRatios || !cfg.aspectRatios.includes(node.data.aspect_ratio)) node.data.aspect_ratio = cfg.defaultAspect;
     }
     function refreshNodeBody(nodeId) {
       // 新架构：不再有内嵌 body，改为刷新预览层 + 元信息 + 参数面板
@@ -501,11 +558,14 @@
         if (node.data.resolution && !node.data.size) node.data.size = node.data.resolution;
         if (!cfg.sizes.includes(node.data.size)) node.data.size = cfg.defaultSize;
       } else {
-        if (!cfg.aspectRatios.includes(node.data.aspect_ratio)) {
+        if (cfg.aspectRatios && !cfg.aspectRatios.includes(node.data.aspect_ratio)) {
           node.data.aspect_ratio = cfg.defaultAspect;
         }
-        if (!cfg.resolutions.includes(node.data.resolution)) {
+        if (cfg.resolutions && !cfg.resolutions.includes(node.data.resolution)) {
           node.data.resolution = cfg.defaultRes;
+        }
+        if (cfg.mjVersions && (!node.data.mj_version || !cfg.mjVersions.includes(node.data.mj_version))) {
+          node.data.mj_version = cfg.defaultMjVersion;
         }
       }
       refreshNodeBody(nodeId);
@@ -1120,6 +1180,8 @@
         `<option value="${a}" ${a===(d.aspect_ratio||cfg.defaultAspect)?'selected':''}>${a}</option>`).join('');
       const resOpts = (cfg.resolutions || []).map(r =>
         `<option value="${r}" ${r===(d.resolution||cfg.defaultRes)?'selected':''}>${r}</option>`).join('');
+      const mjVerOpts = (cfg.mjVersions || []).map(v =>
+        `<option value="${v}" ${v===(d.mj_version||cfg.defaultMjVersion)?'selected':''}>${v}</option>`).join('');
 
       // 上游图1（image1 端口，只读）
       const up1 = getUpstreamByPort(nid, 'image1');
@@ -1149,6 +1211,12 @@
           { field:'image2_url', label:'图2 · 参考图', readonly:true, url: img2Url },
           { field:'image2', label:'图2 · 手动参考' }
         ];
+        if (model === 'rh_gpt_image_official') return [
+          { field:'__upstream', label:'图1 · 主体(上游)', readonly:true, url: img1Url },
+          { field:'image2', label:'图2 · 参考图' },
+          { field:'hair_url', label:'图3 · 发型' },
+          { field:'clothing_url', label:'图4 · 服装' }
+        ];
         if (model === 'nano_banana_2') return [
           { field:'__upstream', label:'图1 · 主体(上游)', readonly:true, url: img1Url },
           { field:'image2_url', label:'图2(上游)', readonly:true, url: img2Url },
@@ -1156,6 +1224,18 @@
           { field:'image3_url', label:'图3 · 手动' },
           { field:'image4_url', label:'图4 · 手动' }
         ];
+        if (model === 'flux_klein_9b') return [
+          { field:'__upstream', label:'图1 · 主体(上游)', readonly:true, url: img1Url }
+        ];
+        if (model === 'seedream_v4' || model === 'seedream_v5_lite') return [
+          { field:'__upstream', label:'图1 · 主体(上游)', readonly:true, url: img1Url },
+          { field:'image2', label:'图2 · 参考图' },
+          { field:'image3_url', label:'图3 · 参考图' },
+          { field:'image4_url', label:'图4 · 参考图' },
+          { field:'hair_url', label:'图5 · 发型' },
+          { field:'clothing_url', label:'图6 · 服装' }
+        ];
+        if (model === 'midjourney_v7' || model === 'krea2') return [];
         return [{ field:'__upstream', label:'图1 · 上游', readonly:true, url: img1Url }];
       })();
 
@@ -1185,14 +1265,21 @@
              <div class="pp-label">尺寸 (size)</div>
              <select onchange="updateNodeData('${nid}','size',this.value)">${sizeOpts}</select>
            </div>`
-        : `<div class="pp-field">
+        : `${cfg.aspectRatios ? `<div class="pp-field">
              <div class="pp-label">比例 (aspect ratio)</div>
              <select onchange="updateNodeData('${nid}','aspect_ratio',this.value)">${arOpts}</select>
-           </div>
-           <div class="pp-field">
+           </div>` : ''}
+           ${cfg.resolutions ? `<div class="pp-field">
              <div class="pp-label">分辨率 (resolution)</div>
              <select onchange="updateNodeData('${nid}','resolution',this.value)">${resOpts}</select>
-           </div>`;
+           </div>` : ''}`;
+
+      const mjVersionField = cfg.mjVersions
+        ? `<div class="pp-field">
+             <div class="pp-label">MJ 版本</div>
+             <select onchange="updateNodeData('${nid}','mj_version',this.value)">${mjVerOpts}</select>
+           </div>`
+        : '';
 
       return `
         <div class="pp-field span-2">
@@ -1205,6 +1292,7 @@
           <select onchange="setNodeModelFromPanel('${nid}',this.value)">${modelOpts}</select>
         </div>
         ${sizeField}
+        ${mjVersionField}
         <div class="pp-field span-3">
           <div class="pp-label">参考图</div>
           <div class="pp-refs">${refsHtml}</div>
@@ -1220,6 +1308,10 @@
       const nid = node.id;
       const channel = d.channel || 'official';
       const isFirstLast = channel === 'first_last_frame';
+      const isSpark = channel === 'seedance_2.0' || channel === 'seedance_2.0_fast';
+      const isFast = channel === 'seedance_2.0_fast';
+      const isMini = channel === 'seedance_2.0_mini';
+      const isSparkLike = isSpark || isMini;  // channels with spark-style options
       const prompt = d.prompt || getDefaultVideoPrompt();
 
       // 首帧端口 first_frame：优先上游，其次手动值
@@ -1231,8 +1323,8 @@
         if (upUrl) { firstFrameUrl = upUrl; firstFromUpstream = true; }
       }
 
-      // 尾帧端口 last_frame：仅首尾帧模式有效
-      const upLast = isFirstLast ? getUpstreamByPort(nid, 'last_frame') : null;
+      // 尾帧端口 last_frame：首尾帧/mini 模式有效
+      const upLast = (isFirstLast || isMini) ? getUpstreamByPort(nid, 'last_frame') : null;
       let lastFrameUrl = d.last_frame || d.image2_url || '';
       let lastFromUpstream = false;
       if (upLast) {
@@ -1240,38 +1332,51 @@
         if (upUrl) { lastFrameUrl = upUrl; lastFromUpstream = true; }
       }
 
-      const ar = d.aspect_ratio || '9:16';
+      const ar = d.aspect_ratio || (isSparkLike ? 'adaptive' : '9:16');
       const dur = d.duration || '5';
-      const res = d.resolution || '480p';
+      const res = d.resolution || (isSparkLike ? '720p' : '480p');
 
-      const arOpts = ['9:16','16:9','1:1','3:4','4:3','21:9'].map(a =>
+      const arList = isSparkLike
+        ? ['adaptive','16:9','4:3','1:1','3:4','9:16','21:9']
+        : ['9:16','16:9','1:1','3:4','4:3','21:9'];
+      const arOpts = arList.map(a =>
         `<option value="${a}" ${a===ar?'selected':''}>${a}</option>`).join('');
-      const durOpts = ['4','5','6','7','8','9','10','11','12','13','14','15'].map(x =>
-        `<option value="${x}" ${x===dur?'selected':''}>${x} 秒</option>`).join('');
-      const resOpts = ['480p','720p','1080p','2k','4k'].map(r =>
+      const durList = isSparkLike
+        ? ['-1','4','5','6','7','8','9','10','11','12','13','14','15']
+        : ['4','5','6','7','8','9','10','11','12','13','14','15'];
+      const durOpts = durList.map(x =>
+        `<option value="${x}" ${x===dur?'selected':''}>${x==='-1'?'自动':x+' 秒'}</option>`).join('');
+      const resList = (channel === 'seedance_2.0')
+        ? ['480p','720p','native1080p','native4k','1080p','2k','4k']
+        : ['480p','720p','1080p','2k','4k'];
+      const resOpts = resList.map(r =>
         `<option value="${r}" ${r===res?'selected':''}>${r}</option>`).join('');
 
       // 首帧槽位
-      const firstReadonly = !isFirstLast || firstFromUpstream;
-      const firstLabel = firstFromUpstream ? `图1 · 首帧（来自 ${NODE_CFG[upFirst.node.type]?.title || upFirst.node.type}）` : '图1 · 首帧';
+      const firstEditable = isFirstLast || isSpark || isMini;
+      const firstReadonly = !firstEditable || firstFromUpstream;
+      const firstLabelRaw = isSpark ? '参考图' : '首帧';
+      const firstLabel = firstFromUpstream ? `图1 · ${firstLabelRaw}（来自 ${NODE_CFG[upFirst.node.type]?.title || upFirst.node.type}）` : `图1 · ${firstLabelRaw}`;
+      const firstEmptyReadonly = firstFromUpstream ? '' : (isSpark ? '可选' : '请连线上游');
+      const firstEmptyUpload = isSpark ? '＋ 上传参考图' : '＋ 上传首帧';
       const firstSlot = firstReadonly
         ? `<div class="pp-ref-slot readonly ${firstFrameUrl?'filled':''}"
                ${firstFrameUrl ? `onclick="openLightbox('${firstFrameUrl}')"` : ''}>
              <div class="pp-ref-label">${firstLabel}</div>
-             ${firstFrameUrl ? `<img src="${firstFrameUrl}"/>` : `<div class="pp-ref-empty">${firstFromUpstream ? '' : '请连线上游'}</div>`}
+             ${firstFrameUrl ? `<img src="${firstFrameUrl}"/>` : `<div class="pp-ref-empty">${firstEmptyReadonly}</div>`}
            </div>`
         : `<div class="pp-ref-slot ${firstFrameUrl?'filled':''}"
                onclick="${firstFrameUrl ? `openLightbox('${firstFrameUrl}')` : `document.getElementById('pp-first-${nid}').click()`}">
              <div class="pp-ref-label">${firstLabel}</div>
              ${firstFrameUrl
                ? `<img src="${firstFrameUrl}"/><button class="pp-ref-clear" onclick="event.stopPropagation();clearNodeField('${nid}','first_frame')">✕</button>`
-               : `<div class="pp-ref-empty">＋ 上传首帧</div>`}
+               : `<div class="pp-ref-empty">${firstEmptyUpload}</div>`}
              <input id="pp-first-${nid}" type="file" accept="image/*" style="display:none"
                     onchange="uploadRefImage('${nid}','first_frame',this)"/>
            </div>`;
 
-      // 尾帧槽位（仅首尾帧模式可编辑）
-      const lastSlot = isFirstLast
+      // 尾帧槽位（首尾帧/mini 模式可编辑）
+      const lastSlot = (isFirstLast || isMini)
         ? (lastFromUpstream
             ? `<div class="pp-ref-slot readonly ${lastFrameUrl?'filled':''}"
                    ${lastFrameUrl ? `onclick="openLightbox('${lastFrameUrl}')"` : ''}>
@@ -1287,10 +1392,45 @@
                  <input id="pp-last-${nid}" type="file" accept="image/*" style="display:none"
                         onchange="uploadRefImage('${nid}','last_frame',this)"/>
                </div>`)
-        : `<div class="pp-ref-slot readonly">
+        : isSpark ? '' : `<div class="pp-ref-slot readonly">
              <div class="pp-ref-label">图2</div>
              <div class="pp-ref-empty">普通模式下忽略</div>
            </div>`;
+
+      // 参考视频槽位（仅 spark 模式）
+      const videoUrl = d.video_url || '';
+      const videoSlot = isSpark
+        ? (videoUrl
+            ? `<div class="pp-ref-slot filled" onclick="openLightbox('${videoUrl}')">
+                 <div class="pp-ref-label">参考视频</div>
+                 <video src="${videoUrl}" muted></video>
+                 <button class="pp-ref-clear" onclick="event.stopPropagation();clearNodeField('${nid}','video_url')">✕</button>
+               </div>`
+            : `<div class="pp-ref-slot" onclick="document.getElementById('pp-video-${nid}').click()">
+                 <div class="pp-ref-label">参考视频（可选）</div>
+                 <div class="pp-ref-empty">＋ 上传视频</div>
+                 <input id="pp-video-${nid}" type="file" accept="video/*" style="display:none"
+                        onchange="uploadRefImage('${nid}','video_url',this)"/>
+               </div>`)
+        : '';
+
+      // spark 模式开关
+      const genAudio = d.generate_audio === true;
+      const realPerson = d.real_person_mode === true;
+      const sparkToggles = isSparkLike
+        ? `<div class="pp-field span-3" style="flex-direction:row;gap:24px;align-items:center;">
+             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+               <input type="checkbox" ${genAudio?'checked':''}
+                      onchange="updateNodeData('${nid}','generate_audio',this.checked)"/>
+               <span>生成音频</span>
+             </label>
+             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+               <input type="checkbox" ${realPerson?'checked':''}
+                      onchange="updateNodeData('${nid}','real_person_mode',this.checked)"/>
+               <span>真人模式</span>
+             </label>
+           </div>`
+        : '';
 
       return `
         <div class="pp-field span-2">
@@ -1304,6 +1444,9 @@
             <option value="official" ${channel==='official'?'selected':''}>seedance 官方稳定版</option>
             <option value="low_cost" ${channel==='low_cost'?'selected':''}>seedance 低价版</option>
             <option value="first_last_frame" ${isFirstLast?'selected':''}>seedance 首尾帧</option>
+            <option value="seedance_2.0" ${channel==='seedance_2.0'?'selected':''}>seedance 2.0 多模态</option>
+            <option value="seedance_2.0_fast" ${channel==='seedance_2.0_fast'?'selected':''}>seedance 2.0 Fast</option>
+            <option value="seedance_2.0_mini" ${isMini?'selected':''}>seedance 2.0 Mini 图生视频</option>
           </select>
         </div>
         <div class="pp-field">
@@ -1314,18 +1457,27 @@
           <div class="pp-label">时长</div>
           <select onchange="updateNodeData('${nid}','duration',this.value)">${durOpts}</select>
         </div>
-        ${isFirstLast ? `
+        ${isFirstLast || isSparkLike ? `
         <div class="pp-field">
           <div class="pp-label">分辨率</div>
           <select onchange="updateNodeData('${nid}','resolution',this.value)">${resOpts}</select>
         </div>` : ''}
+        ${isSpark ? `
+        <div class="pp-field span-3">
+          <div class="pp-label">参考素材</div>
+          <div class="pp-refs" style="grid-template-columns:repeat(2,minmax(140px,1fr));max-width:400px;">
+            ${firstSlot}${videoSlot}
+          </div>
+          <div class="pp-hint">图1为参考图（可选），视频为参考视频（可选，用于视频编辑/续写）</div>
+        </div>` : `
         <div class="pp-field span-3">
           <div class="pp-label">首尾帧</div>
           <div class="pp-refs" style="grid-template-columns:repeat(2,minmax(140px,1fr));max-width:400px;">
             ${firstSlot}${lastSlot}
           </div>
-          <div class="pp-hint">${isFirstLast ? '首尾帧模式：图1必填，图2可选（尾帧）' : '普通模式：图1来自上游连线，图2被忽略'}</div>
-        </div>`;
+          <div class="pp-hint">${isFirstLast ? '首尾帧模式：图1必填，图2可选（尾帧）' : isMini ? 'Mini 模式：图1必填（首帧），图2可选（尾帧）' : '普通模式：图1来自上游连线，图2被忽略'}</div>
+        </div>`}
+        ${sparkToggles}`;
     }
 
     // 从参数面板切换模型（需要走 setNodeModel 保证参数迁移）

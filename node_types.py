@@ -48,6 +48,10 @@ class GptImageInput:
     # nano_banana_2 额外参考图（非端口，用户配置）
     image3_url: str | None = None
     image4_url: str | None = None
+    # rh_gpt_image_official 画质（low/medium/high）
+    quality: str = "medium"
+    # midjourney_v7 版本选择
+    mj_version: str = "Midjourney V7"
 
 
 @dataclass
@@ -78,6 +82,10 @@ class SeedanceInput:
     aspect_ratio: str = "9:16"
     channel: str = "official"
     resolution: str = "480p"
+    # seedance 2.0 多模态
+    video_url: str | None = None     # 参考视频 URL（视频编辑/续写）
+    generate_audio: bool = False
+    real_person_mode: bool = False
 
 
 # ───────────────────────── 端口声明（扩展 overridable） ─────────────────────────
