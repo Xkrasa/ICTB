@@ -36,10 +36,18 @@ from storage import storage
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时无需预创建（httpx client 懒加载），关闭时释放共享连接。"""
+    """应用生命周期：启动时恢复未完成的 RH 任务，关闭时释放共享连接。"""
+    resume_tasks = await orchestrator.resume_interrupted_nodes()
+    if resume_tasks:
+        asyncio.create_task(_gather_resume_tasks(resume_tasks))
     yield
     await close_http_client()
     orchestrator.registry.close()
+
+
+async def _gather_resume_tasks(tasks: list) -> None:
+    """后台 gather 恢复任务，忽略异常（单个任务失败不应影响其它）。"""
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(title="AI 团播资产画布 — Phase 3", lifespan=lifespan)

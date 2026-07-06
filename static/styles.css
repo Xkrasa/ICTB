@@ -414,6 +414,30 @@
     .node-preview-layer img:hover { transform: scale(1.03); }
     .node.dragging .node-preview-layer img,
     .node.dragging .node-preview-layer video { cursor: grabbing; }
+    .node-preview-layer .video-preview-wrap {
+      position: relative;
+      width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .node-preview-layer .video-preview-wrap .video-play-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.35);
+      opacity: 1;
+      transition: opacity var(--dur-fast) var(--ease-out);
+      pointer-events: none;
+    }
+    .node-preview-layer .video-preview-wrap.playing .video-play-overlay { opacity: 0; }
+    .node-preview-layer .video-preview-wrap .video-play-overlay svg {
+      width: 36px; height: 36px;
+      color: rgba(255,255,255,0.92);
+      filter: drop-shadow(0 2px 6px rgba(0,0,0,0.5));
+    }
+    .node-preview-layer .video-preview-wrap video { position: relative; z-index: 1; }
+    .node-preview-layer .video-preview-wrap video:hover { transform: scale(1.03); }
+    .node-preview-layer .video-preview-wrap.playing video { cursor: pointer; }
+    .node.dragging .video-preview-wrap video { cursor: grabbing; }
 
     /* 预览工具栏（悬浮在预览层右上角，默认隐藏，hover 时显示） */
     .node-preview-layer .preview-tools {

@@ -19,6 +19,32 @@ from node_types import SeedanceInput, NodeOutput
 from executors._helpers import make_rh_progress_cb
 
 
+def _make_progress_cb(on_progress: Callable[[int], None], start: int = 20):
+    """构造 RH 状态→进度的回调（官方/低价/2.0/Mini 通用）。"""
+    cur = [start]
+
+    def cb(status: str) -> None:
+        if status == "QUEUED":
+            cur[0] = start
+            on_progress(start)
+        elif status == "RUNNING":
+            cur[0] = min(cur[0] + 5, 80)
+            on_progress(cur[0])
+
+    return cb
+
+
+async def _download_and_save_video(video_url: str, on_progress: Callable[[int], None]) -> str:
+    """下载 RH 视频 URL 并转存为本地永久 URL。"""
+    on_progress(85)
+    client = get_client()
+    resp = await client.get(video_url, timeout=120)
+    resp.raise_for_status()
+    url = await storage.save(resp.content, "mp4")
+    on_progress(95)
+    return url
+
+
 async def execute(input: SeedanceInput, on_progress: Callable[[int], None],
                   on_submitted: Callable[[str], None] | None = None) -> NodeOutput:
     if not config.RUNNINGHUB_API_KEY:
@@ -82,26 +108,10 @@ async def execute(input: SeedanceInput, on_progress: Callable[[int], None],
         )
         submitted(task_id)
 
-        cur = [20]
-
-        def on_status_spark(status: str) -> None:
-            if status == "QUEUED":
-                cur[0] = 20
-                on_progress(20)
-            elif status == "RUNNING":
-                cur[0] = min(cur[0] + 5, 80)
-                on_progress(cur[0])
-
+        cb = _make_progress_cb(on_progress, start=20)
         on_progress(20)
-        video_url = await runninghub.wait_for_result(task_id, on_status_spark)
-
-        on_progress(85)
-        client = get_client()
-        resp = await client.get(video_url, timeout=120)
-        resp.raise_for_status()
-
-        url = await storage.save(resp.content, "mp4")
-        on_progress(95)
+        video_url = await runninghub.wait_for_result(task_id, cb)
+        url = await _download_and_save_video(video_url, on_progress)
         return NodeOutput(video_url=url)
 
     # ── seedance 2.0 Mini 图生视频模式 ──
@@ -128,26 +138,10 @@ async def execute(input: SeedanceInput, on_progress: Callable[[int], None],
         )
         submitted(task_id)
 
-        cur = [20]
-
-        def on_status_mini(status: str) -> None:
-            if status == "QUEUED":
-                cur[0] = 20
-                on_progress(20)
-            elif status == "RUNNING":
-                cur[0] = min(cur[0] + 5, 80)
-                on_progress(cur[0])
-
+        cb = _make_progress_cb(on_progress, start=20)
         on_progress(20)
-        video_url = await runninghub.wait_for_result(task_id, on_status_mini)
-
-        on_progress(85)
-        client = get_client()
-        resp = await client.get(video_url, timeout=120)
-        resp.raise_for_status()
-
-        url = await storage.save(resp.content, "mp4")
-        on_progress(95)
+        video_url = await runninghub.wait_for_result(task_id, cb)
+        url = await _download_and_save_video(video_url, on_progress)
         return NodeOutput(video_url=url)
 
     # ── 官方/低价版模式 ──
@@ -163,25 +157,25 @@ async def execute(input: SeedanceInput, on_progress: Callable[[int], None],
     )
     submitted(task_id)
 
-    # 渐进进度（局部变量，原逻辑读 registry）
-    cur = [20]
+    cb = _make_progress_cb(on_progress, start=20)
+    on_progress(20)
+    video_url = await runninghub.wait_for_result(task_id, cb)
+    url = await _download_and_save_video(video_url, on_progress)
+    return NodeOutput(video_url=url)
 
-    def on_status(status: str) -> None:
-        if status == "QUEUED":
-            cur[0] = 20
-            on_progress(20)
-        elif status == "RUNNING":
-            cur[0] = min(cur[0] + 5, 80)
-            on_progress(cur[0])
+
+async def resume(external_task_id: str, channel: str,
+                 on_progress: Callable[[int], None]) -> NodeOutput:
+    """进程重启后恢复 RH 视频任务轮询。
+
+    仅依赖 external_task_id 即可继续查询 RunningHub，无需原始输入参数。
+    channel 用于选择正确的进度回调和状态机，但不影响 query_task 接口。
+    """
+    if not config.RUNNINGHUB_API_KEY:
+        raise ValueError("未配置 RUNNINGHUB_API_KEY，请在 .env 中设置")
 
     on_progress(20)
-    video_url = await runninghub.wait_for_result(task_id, on_status)
-
-    on_progress(85)
-    client = get_client()
-    resp = await client.get(video_url, timeout=120)
-    resp.raise_for_status()
-
-    url = await storage.save(resp.content, "mp4")
-    on_progress(95)
+    cb = _make_progress_cb(on_progress, start=20)
+    video_url = await runninghub.wait_for_result(external_task_id, cb)
+    url = await _download_and_save_video(video_url, on_progress)
     return NodeOutput(video_url=url)

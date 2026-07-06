@@ -394,8 +394,13 @@
       // 视频节点：优先视频，其次首帧
       if (node.type === 'seedance_video') {
         if (d.video_url) {
-          return `<video src="${d.video_url}" muted playsinline preload="metadata"></video>
-            ${buildPreviewTools(d.video_url, true)}`;
+          return `<div class="video-preview-wrap" title="点击播放/暂停">
+            <video src="${d.video_url}" muted loop playsinline preload="metadata" poster="${d.first_frame || d.image_url || ''}"></video>
+            <div class="video-play-overlay">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            </div>
+          </div>
+          ${buildPreviewTools(d.video_url, true)}`;
         }
         const firstFrame = d.first_frame || d.image_url;
         if (firstFrame) {
@@ -1058,10 +1063,19 @@
           connStart = { nodeId: node.id, portName: p.dataset.portname };
         });
       });
-      // 单击（不拖拽时）：打开参数面板
+      // 单击（不拖拽时）：打开参数面板；视频预览播放/暂停
       el.addEventListener('click', (e) => {
         if (e.target.closest('.port') || e.target.closest('.node-delete')) return;
         if (e.target.closest('.pv-tool')) return;   // 预览工具栏点击不弹参数面板
+        if (e.target.closest('.video-preview-wrap')) {
+          const wrap = e.target.closest('.video-preview-wrap');
+          const v = wrap.querySelector('video');
+          if (v) {
+            if (v.paused) { v.play(); wrap.classList.add('playing'); }
+            else { v.pause(); wrap.classList.remove('playing'); }
+            return;
+          }
+        }
         openParamsPanel(node.id);
       });
       // 双击：打开参数面板并聚焦第一个字段（mask_edit 特殊 → 遮罩编辑器）

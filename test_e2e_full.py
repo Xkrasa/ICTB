@@ -11,11 +11,24 @@ os.environ['GPT_IMAGE_TIMEOUT'] = '15'  # 缩短 AI 调用超时，避免测试�
 import asyncio
 import io
 import time
+
+import pytest
 import requests
 import numpy as np
 from PIL import Image, ImageDraw
 
-BASE = 'http://127.0.0.1:8001'
+BASE = os.getenv('E2E_BASE_URL', 'http://127.0.0.1:8000')
+
+
+def _service_available():
+    try:
+        requests.get(f'{BASE}/health', timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _service_available(), reason=f'服务 {BASE} 未启动，跳过 E2E 测试')
 
 
 def create_face_image(width=512, height=512, face_x=150, face_y=100, face_w=212, face_h=280, bg_color=(200, 180, 160)):

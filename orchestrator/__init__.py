@@ -5,7 +5,7 @@ main.py 通过 orchestrator.xxx 访问，拆包后接口不变。
 from .registry import registry, TaskRegistry
 from ._shared import classify_error, _record_image_size, SEM, _background_tasks
 from .phase1 import create_task
-from .engine import execute_canvas, approve_node, reject_node
+from .engine import execute_canvas, approve_node, reject_node, resume_interrupted_nodes
 from .batch import (
     execute_batch, aggregate_batch, list_batches,
     adopt_batch, retry_candidate, start_video,
@@ -14,6 +14,7 @@ from .batch import (
 __all__ = [
     "registry", "TaskRegistry", "classify_error",
     "create_task", "execute_canvas", "approve_node", "reject_node",
+    "resume_interrupted_nodes",
     "execute_batch", "aggregate_batch", "list_batches",
     "adopt_batch", "retry_candidate", "start_video",
 ]

@@ -312,3 +312,75 @@ def _schedule_cascade(canvas_id: str, node_id: str, success: bool) -> None:
         if ctx["remaining"][downstream] == 0:
             _start_node(canvas_id, downstream)
 
+
+# ───────────────────────── 进程重启后续跑 ──────────────────────────
+
+_RESUMEABLE_NODE_TYPES = {"seedance_video"}
+
+
+def _resume_node(canvas_id: str, node_id: str, rec: dict) -> asyncio.Task:
+    """恢复单个已提交外部任务但进程重启丢失的节点执行，返回后台任务。"""
+    node_type = rec.get("node_type", "unknown")
+    external_task_id = rec.get("external_task_id")
+    key = f"{canvas_id}:{node_id}"
+
+    async def _run_resume() -> None:
+        try:
+            from executors import NODE_EXECUTORS
+            executor = NODE_EXECUTORS.get(node_type)
+            if executor is None:
+                raise ValueError(f"未知节点类型: {node_type}")
+            # 执行器必须有 resume 入口
+            resume_fn = getattr(executor, "resume", None)
+            if resume_fn is None:
+                raise ValueError(f"节点 {node_type} 不支持续跑")
+
+            def on_progress(p: int) -> None:
+                registry.update(key, progress=p)
+
+            out = await resume_fn(external_task_id, rec.get("channel", ""), on_progress)
+            asset_updates = {}
+            if out.image_url: asset_updates["image_url"] = out.image_url
+            if out.video_url: asset_updates["video_url"] = out.video_url
+            if out.mask_url:  asset_updates["mask_url"] = out.mask_url
+            if asset_updates:
+                registry.update(key, **asset_updates)
+            registry.update(key, status="success", progress=100, error=None)
+            logger.info("resumed node %s:%s success", canvas_id, node_id)
+        except Exception as e:  # noqa: BLE001
+            err_info = classify_error(str(e))
+            registry.update(key, status="failed", error=f"[{err_info['code']}] {err_info['label']}: {e}")
+            logger.error("resumed node %s:%s failed: %s", canvas_id, node_id, e)
+
+    registry.update(key, status="running", error=None)
+    loop = asyncio.get_running_loop()
+    t = loop.create_task(_run_resume())
+    _background_tasks.add(t)
+    t.add_done_callback(_background_tasks.discard)
+    return t
+
+
+async def resume_interrupted_nodes() -> list[asyncio.Task]:
+    """启动时扫描 registry，恢复已提交外部任务但未完成的节点。
+
+    恢复条件：status == running 或 pending，且有 external_task_id。
+    返回创建的后台任务列表，调用方（lifespan）可 await gather。
+    设计为 async 函数，确保始终在事件循环内创建 task。
+    """
+    tasks = []
+    for key, rec in registry._tasks.items():
+        if ":" not in key:
+            continue
+        canvas_id, node_id = key.split(":", 1)
+        status = rec.get("status")
+        node_type = rec.get("node_type", "")
+        if status not in ("running", "pending"):
+            continue
+        if node_type not in _RESUMEABLE_NODE_TYPES:
+            continue
+        if not rec.get("external_task_id"):
+            continue
+        tasks.append(_resume_node(canvas_id, node_id, rec))
+    if tasks:
+        logger.info("resumed %d interrupted nodes", len(tasks))
+    return tasks
